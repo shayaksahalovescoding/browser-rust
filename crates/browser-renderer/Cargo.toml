@@ -1,0 +1,8 @@
+[package]
+name = "browser-renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+browser-gfx = { path = "../browser-gfx" }
+browser-ipc = { path = "../browser-ipc" }
