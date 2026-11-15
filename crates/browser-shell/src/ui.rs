@@ -8,6 +8,7 @@ use crate::tabs::{TabManager, TabState, TabStatus};
 pub const TAB_STRIP_H: i32 = 38;
 pub const TOOLBAR_H: i32 = 42;
 pub const CHROME_TOP_H: i32 = TAB_STRIP_H + TOOLBAR_H;
+pub const DEVTOOLS_H: i32 = 190;
 
 const STRIP_BG: Color = Color::rgb(222, 225, 230);
 const TOOLBAR_BG: Color = Color::rgb(255, 255, 255);
@@ -32,6 +33,7 @@ pub enum UiAction {
     Back,
     Forward,
     Reload,
+    ToggleDevTools,
     FocusOmnibox,
     ViewportClick { x: i32, y: i32 },
 }
@@ -123,11 +125,19 @@ pub struct UiLayout {
     pub forward_rect: Rect,
     pub reload_rect: Rect,
     pub omnibox_rect: Rect,
+    pub devtools_rect: Rect,
     pub crash_reload_rect: Option<Rect>,
+    pub viewport_h: i32,
 }
 
 impl UiLayout {
-    pub fn compute(width: i32, height: i32, tab_count: usize, crashed: bool) -> Self {
+    pub fn compute(
+        width: i32,
+        height: i32,
+        tab_count: usize,
+        crashed: bool,
+        devtools_open: bool,
+    ) -> Self {
         let max_tabs_w = (width - 56).max(120);
         let tab_w = if tab_count > 0 {
             (max_tabs_w / tab_count as i32).clamp(90, 220)
@@ -150,15 +160,19 @@ impl UiLayout {
         let back_rect = Rect::new(8, TAB_STRIP_H + 6, 30, 30);
         let forward_rect = Rect::new(42, TAB_STRIP_H + 6, 30, 30);
         let reload_rect = Rect::new(76, TAB_STRIP_H + 6, 30, 30);
+        let devtools_w = 88;
+        let devtools_rect = Rect::new((width - devtools_w - 10).max(200), TAB_STRIP_H + 6, devtools_w, 30);
         let omnibox_x = 116;
-        let omnibox_w = (width - omnibox_x - 16).max(80);
+        let omnibox_w = (devtools_rect.x - omnibox_x - 10).max(80);
         let omnibox_rect = Rect::new(omnibox_x, TAB_STRIP_H + 6, omnibox_w, 30);
 
+        let drawer_h = if devtools_open { DEVTOOLS_H } else { 0 };
+        let viewport_h = (height - CHROME_TOP_H - drawer_h).max(80);
+
         let crash_reload_rect = if crashed {
-            let vp_h = (height - CHROME_TOP_H).max(100);
             Some(Rect::new(
                 (width / 2 - 70).max(40),
-                CHROME_TOP_H + vp_h / 2 + 30,
+                CHROME_TOP_H + viewport_h / 2 + 30,
                 140,
                 36,
             ))
@@ -176,7 +190,9 @@ impl UiLayout {
             forward_rect,
             reload_rect,
             omnibox_rect,
+            devtools_rect,
             crash_reload_rect,
+            viewport_h,
         }
     }
 
@@ -203,6 +219,9 @@ impl UiLayout {
         if self.reload_rect.contains(x, y) {
             return Some(UiAction::Reload);
         }
+        if self.devtools_rect.contains(x, y) {
+            return Some(UiAction::ToggleDevTools);
+        }
         if self.omnibox_rect.contains(x, y) {
             return Some(UiAction::FocusOmnibox);
         }
@@ -211,7 +230,7 @@ impl UiLayout {
                 return Some(UiAction::Reload);
             }
         }
-        if y >= CHROME_TOP_H {
+        if y >= CHROME_TOP_H && y < CHROME_TOP_H + self.viewport_h {
             return Some(UiAction::ViewportClick {
                 x,
                 y: y - CHROME_TOP_H,
@@ -227,6 +246,7 @@ pub fn render_browser_frame(
     omnibox: &OmniboxState,
     hover: Option<(i32, i32)>,
     renderer: Option<&TabRendererHandle>,
+    devtools_open: bool,
 ) {
     let w = compositor.width as i32;
     let h = compositor.height as i32;
@@ -235,7 +255,7 @@ pub fn render_browser_frame(
         active_tab.map(|t| &t.status),
         Some(TabStatus::Crashed { .. })
     );
-    let layout = UiLayout::compute(w, h, tabs.tabs().len(), is_crashed);
+    let layout = UiLayout::compute(w, h, tabs.tabs().len(), is_crashed, devtools_open);
 
     let mut view = compositor.view_mut();
 
@@ -320,6 +340,23 @@ pub fn render_browser_frame(
         TEXT_DARK,
     );
 
+    // DevTools chip
+    let dt_bg = if devtools_open {
+        Color::rgb(210, 227, 252)
+    } else if hover.is_some_and(|(hx, hy)| layout.devtools_rect.contains(hx, hy)) {
+        BTN_HOVER
+    } else {
+        OMNIBOX_BG
+    };
+    view.fill_rounded_rect(layout.devtools_rect, 8, dt_bg);
+    view.draw_text(
+        layout.devtools_rect.x + 12,
+        layout.devtools_rect.y + 11,
+        1,
+        if devtools_open { ACCENT_BLUE } else { TEXT_DARK },
+        "DevTools",
+    );
+
     // Omnibox
     view.fill_rounded_rect(layout.omnibox_rect, 15, OMNIBOX_BG);
     if omnibox.focused {
@@ -354,15 +391,55 @@ pub fn render_browser_frame(
             }
             TabStatus::Loading | TabStatus::Ready => {
                 if let Some(r) = renderer {
-                    view.blit_bgra(0, CHROME_TOP_H, r.width(), r.height(), r.pixels());
+                    let blit_h = r.height().min(layout.viewport_h as u32);
+                    view.blit_bgra(0, CHROME_TOP_H, r.width(), blit_h, r.pixels());
                 } else {
                     view.fill_rect(
-                        Rect::new(0, CHROME_TOP_H, w, (h - CHROME_TOP_H).max(0)),
+                        Rect::new(0, CHROME_TOP_H, w, layout.viewport_h),
                         Color::rgb(255, 255, 255),
                     );
                 }
             }
         }
+        if devtools_open {
+            render_devtools_drawer(&mut view, w, CHROME_TOP_H + layout.viewport_h, h, tab);
+        }
+    }
+}
+
+fn render_devtools_drawer(
+    view: &mut CanvasView<'_>,
+    w: i32,
+    top_y: i32,
+    h: i32,
+    tab: &TabState,
+) {
+    let drawer_h = (h - top_y).max(0);
+    if drawer_h <= 0 {
+        return;
+    }
+    view.fill_rect(Rect::new(0, top_y, w, drawer_h), Color::rgb(32, 33, 36));
+    view.fill_rect(Rect::new(0, top_y, w, 2), ACCENT_BLUE);
+    view.draw_text(12, top_y + 8, 1, Color::rgb(138, 180, 248), "DevTools | DOM & Console (F12 to close)");
+
+    let half_w = (w / 2).max(120);
+    view.fill_rect(Rect::new(half_w, top_y + 24, 1, drawer_h - 24), Color::rgb(60, 64, 67));
+
+    if let Some(dt) = &tab.devtools {
+        view.draw_text_clipped(12, top_y + 26, 1, Color::rgb(129, 201, 149), &dt.network_summary, half_w - 20);
+        let mut y = top_y + 42;
+        for line in dt.dom_dump.lines().take(10) {
+            view.draw_text_clipped(12, y, 1, Color::rgb(232, 234, 237), line, half_w - 20);
+            y += 13;
+        }
+        view.draw_text(half_w + 12, top_y + 26, 1, Color::rgb(253, 214, 99), "Console:");
+        let mut cy = top_y + 42;
+        for line in dt.console_logs.lines().take(10) {
+            view.draw_text_clipped(half_w + 12, cy, 1, Color::rgb(232, 234, 237), line, (w - half_w - 24).max(60));
+            cy += 13;
+        }
+    } else {
+        view.draw_text(12, top_y + 30, 1, Color::rgb(154, 160, 166), "Waiting for document telemetry...");
     }
 }
 

@@ -60,6 +60,13 @@ impl TabHistory {
 }
 
 #[derive(Debug, Clone)]
+pub struct DevToolsSnapshot {
+    pub network_summary: String,
+    pub dom_dump: String,
+    pub console_logs: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TabState {
     pub id: u64,
     pub title: String,
@@ -68,6 +75,7 @@ pub struct TabState {
     pub status: TabStatus,
     pub renderer_pid: Option<u32>,
     pub active_nav_id: u64,
+    pub devtools: Option<DevToolsSnapshot>,
 }
 
 pub struct TabManager {
@@ -125,6 +133,7 @@ impl TabManager {
             status: TabStatus::Loading,
             renderer_pid: None,
             active_nav_id: nav_id,
+            devtools: None,
         });
         self.active_index = self.tabs.len() - 1;
         id

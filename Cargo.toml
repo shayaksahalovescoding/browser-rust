@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/browser-ipc",
     "crates/browser-gfx",
+    "crates/browser-net",
+    "crates/browser-dom",
+    "crates/browser-js",
     "crates/browser-renderer",
     "crates/browser-shell",
 ]

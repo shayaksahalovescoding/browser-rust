@@ -47,6 +47,9 @@ pub enum BrowserToRenderer {
     KeyPress {
         ch: char,
     },
+    Scroll {
+        delta_y: i32,
+    },
     Shutdown,
 }
 
@@ -68,6 +71,12 @@ pub enum RendererToBrowser {
     },
     RequestNavigate {
         url: String,
+    },
+    DevToolsInfo {
+        nav_id: u64,
+        network_summary: String,
+        dom_dump: String,
+        console_logs: String,
     },
 }
 
@@ -185,6 +194,11 @@ impl BrowserToRenderer {
                 e.u32(*ch as u32);
                 e.finish()
             }
+            Self::Scroll { delta_y } => {
+                let mut e = Encoder::new(7);
+                e.i32(*delta_y);
+                e.finish()
+            }
             Self::Shutdown => Encoder::new(6).finish(),
         }
     }
@@ -218,6 +232,7 @@ impl BrowserToRenderer {
                 Self::KeyPress { ch }
             }
             6 => Self::Shutdown,
+            7 => Self::Scroll { delta_y: d.i32()? },
             tag => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -275,6 +290,19 @@ impl RendererToBrowser {
                 e.str(url);
                 e.finish()
             }
+            Self::DevToolsInfo {
+                nav_id,
+                network_summary,
+                dom_dump,
+                console_logs,
+            } => {
+                let mut e = Encoder::new(5);
+                e.u64(*nav_id);
+                e.str(network_summary);
+                e.str(dom_dump);
+                e.str(console_logs);
+                e.finish()
+            }
         }
     }
 
@@ -294,6 +322,12 @@ impl RendererToBrowser {
                 error: d.str()?,
             },
             4 => Self::RequestNavigate { url: d.str()? },
+            5 => Self::DevToolsInfo {
+                nav_id: d.u64()?,
+                network_summary: d.str()?,
+                dom_dump: d.str()?,
+                console_logs: d.str()?,
+            },
             tag => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

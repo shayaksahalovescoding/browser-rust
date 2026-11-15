@@ -34,6 +34,12 @@ pub enum RendererEventKind {
     RequestNavigate {
         url: String,
     },
+    DevToolsInfo {
+        nav_id: u64,
+        network_summary: String,
+        dom_dump: String,
+        console_logs: String,
+    },
     Crashed,
 }
 
@@ -193,6 +199,17 @@ impl ProcessManager {
                             RendererToBrowser::RequestNavigate { url } => {
                                 RendererEventKind::RequestNavigate { url }
                             }
+                            RendererToBrowser::DevToolsInfo {
+                                nav_id,
+                                network_summary,
+                                dom_dump,
+                                console_logs,
+                            } => RendererEventKind::DevToolsInfo {
+                                nav_id,
+                                network_summary,
+                                dom_dump,
+                                console_logs,
+                            },
                         };
                         let _ = tx.send(RendererEvent { tab_id, kind });
                         wakeup();

@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+browser-dom = { path = "../browser-dom" }
 browser-gfx = { path = "../browser-gfx" }
 browser-ipc = { path = "../browser-ipc" }
+browser-js = { path = "../browser-js" }
+browser-net = { path = "../browser-net" }

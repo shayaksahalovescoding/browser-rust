@@ -56,10 +56,14 @@ fn tab_manager_and_ui_hit_testing() {
     mgr.close_tab(1);
     assert_eq!(mgr.tabs().len(), 1);
 
-    let layout = UiLayout::compute(1000, 700, 1, false);
+    let layout = UiLayout::compute(1000, 700, 1, false, false);
     assert_eq!(
         layout.hit_test(layout.back_rect.x + 5, layout.back_rect.y + 5),
         Some(UiAction::Back)
+    );
+    assert_eq!(
+        layout.hit_test(layout.devtools_rect.x + 5, layout.devtools_rect.y + 5),
+        Some(UiAction::ToggleDevTools)
     );
     assert_eq!(
         layout.hit_test(layout.omnibox_rect.x + 10, layout.omnibox_rect.y + 10),
@@ -121,18 +125,51 @@ fn multiprocess_renderer_lifecycle_and_crash_isolation() {
         }
         other => panic!("expected FrameCommitted, got {other:?}"),
     }
+    let dt1 = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(dt1.kind, RendererEventKind::DevToolsInfo { .. }));
 
     let pixels = procs.get(1).unwrap().pixels();
     assert_eq!(pixels.len(), 640 * 480 * 4);
     let has_non_white = pixels.chunks_exact(4).any(|p| p != [255, 255, 255, 255]);
     assert!(has_non_white, "expected rendered text/UI pixels in shm");
 
-    // 3. Trigger chrome://crash and verify parent stays safe and receives Crashed event
+    // 3. Navigate to chrome://demo (HTML5 + CSS3 + Flexbox + JS engine)
     procs
         .get_mut(1)
         .unwrap()
         .send(&BrowserToRenderer::Navigate {
             nav_id: 2,
+            url: "chrome://demo".into(),
+        })
+        .unwrap();
+
+    let ev_demo = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match ev_demo.kind {
+        RendererEventKind::FrameCommitted { nav_id, title, .. } => {
+            assert_eq!(nav_id, 2);
+            assert_eq!(title, "Chrome Scratch Engine Demo");
+        }
+        other => panic!("expected FrameCommitted for chrome://demo, got {other:?}"),
+    }
+    let dt_demo = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match dt_demo.kind {
+        RendererEventKind::DevToolsInfo {
+            dom_dump,
+            console_logs,
+            ..
+        } => {
+            assert!(dom_dump.contains("<h1>"));
+            assert!(console_logs.contains("chrome://demo script initialized"));
+        }
+        other => panic!("expected DevToolsInfo for chrome://demo, got {other:?}"),
+    }
+
+    // 4. Trigger chrome://crash and verify parent stays safe and receives Crashed event
+    procs
+        .get_mut(1)
+        .unwrap()
+        .send(&BrowserToRenderer::Navigate {
+            nav_id: 3,
             url: "chrome://crash".into(),
         })
         .unwrap();

@@ -6,8 +6,11 @@ use browser_gfx::OwnedCanvas;
 use browser_ipc::{BrowserToRenderer, MouseButton};
 
 use crate::process::{ProcessManager, RendererEvent, RendererEventKind};
-use crate::tabs::{TabManager, TabStatus, normalize_omnibox_input};
-use crate::ui::{CHROME_TOP_H, OmniboxState, UiAction, UiLayout, render_browser_frame, sync_omnibox_with_tab};
+use crate::tabs::{DevToolsSnapshot, TabManager, TabStatus, normalize_omnibox_input};
+use crate::ui::{
+    CHROME_TOP_H, DEVTOOLS_H, OmniboxState, UiAction, UiLayout, render_browser_frame,
+    sync_omnibox_with_tab,
+};
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
@@ -17,6 +20,7 @@ const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_APP_IPC: u32 = 0x8001;
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -37,8 +41,13 @@ const VK_ESCAPE: usize = 0x1B;
 const VK_END: usize = 0x23;
 const VK_HOME: usize = 0x24;
 const VK_LEFT: usize = 0x25;
+const VK_UP: usize = 0x26;
 const VK_RIGHT: usize = 0x27;
+const VK_DOWN: usize = 0x28;
+const VK_PRIOR: usize = 0x21;
+const VK_NEXT: usize = 0x22;
 const VK_F5: usize = 0x74;
+const VK_F12: usize = 0x7B;
 
 type WndProc = unsafe extern "system" fn(isize, u32, usize, isize) -> isize;
 
@@ -186,13 +195,24 @@ struct AppState {
     omnibox: OmniboxState,
     compositor: OwnedCanvas,
     hover: Option<(i32, i32)>,
+    devtools_open: bool,
 }
 
 impl AppState {
     fn viewport_dims(&self) -> (u32, u32) {
         let w = self.compositor.width.max(1);
-        let h = (self.compositor.height as i32 - CHROME_TOP_H).max(1) as u32;
+        let drawer = if self.devtools_open { DEVTOOLS_H } else { 0 };
+        let h = (self.compositor.height as i32 - CHROME_TOP_H - drawer).max(80) as u32;
         (w, h)
+    }
+
+    fn toggle_devtools(&mut self) {
+        self.devtools_open = !self.devtools_open;
+        let (vw, vh) = self.viewport_dims();
+        if let Some(active_id) = self.tabs.active_tab().map(|t| t.id) {
+            let _ = self.procs.resize_tab(active_id, vw, vh);
+        }
+        self.invalidate();
     }
 
     fn spawn_and_navigate_tab(&mut self, tab_id: u64, url: String, push_history: bool) {
@@ -342,6 +362,22 @@ impl AppState {
                         self.spawn_and_navigate_tab(ev.tab_id, url, true);
                     }
                 }
+                RendererEventKind::DevToolsInfo {
+                    nav_id,
+                    network_summary,
+                    dom_dump,
+                    console_logs,
+                } => {
+                    if let Some(tab) = self.tabs.find_by_id_mut(ev.tab_id) {
+                        if nav_id == tab.active_nav_id || nav_id == 0 {
+                            tab.devtools = Some(DevToolsSnapshot {
+                                network_summary,
+                                dom_dump,
+                                console_logs,
+                            });
+                        }
+                    }
+                }
                 RendererEventKind::Crashed => {
                     let exit_code = self
                         .procs
@@ -397,6 +433,7 @@ impl AppState {
             self.compositor.height as i32,
             self.tabs.tabs().len(),
             crashed,
+            self.devtools_open,
         );
         match layout.hit_test(x, y) {
             Some(UiAction::SelectTab(idx)) => self.select_tab_at(idx),
@@ -405,6 +442,7 @@ impl AppState {
             Some(UiAction::Back) => self.go_back(),
             Some(UiAction::Forward) => self.go_forward(),
             Some(UiAction::Reload) => self.reload_active(),
+            Some(UiAction::ToggleDevTools) => self.toggle_devtools(),
             Some(UiAction::FocusOmnibox) => {
                 self.omnibox.focus_and_select_all();
                 self.invalidate();
@@ -459,6 +497,23 @@ impl AppState {
         if vk == VK_F5 {
             self.reload_active();
             return;
+        }
+        if vk == VK_F12 {
+            self.toggle_devtools();
+            return;
+        }
+        if !self.omnibox.focused {
+            let scroll_delta = match vk {
+                VK_DOWN => Some(-48),
+                VK_UP => Some(48),
+                VK_NEXT => Some(-240),
+                VK_PRIOR => Some(240),
+                _ => None,
+            };
+            if let Some(delta_y) = scroll_delta {
+                self.send_scroll(delta_y);
+                return;
+            }
         }
         if self.omnibox.focused {
             match vk {
@@ -518,6 +573,14 @@ impl AppState {
         }
     }
 
+    fn send_scroll(&mut self, delta_y: i32) {
+        if let Some(active_id) = self.tabs.active_tab().map(|t| t.id) {
+            if let Some(handle) = self.procs.get_mut(active_id) {
+                let _ = handle.send(&BrowserToRenderer::Scroll { delta_y });
+            }
+        }
+    }
+
     fn paint(&mut self) {
         let active_id = self.tabs.active_tab().map(|t| t.id);
         let renderer = active_id.and_then(|id| self.procs.get(id));
@@ -527,6 +590,7 @@ impl AppState {
             &self.omnibox,
             self.hover,
             renderer,
+            self.devtools_open,
         );
     }
 
@@ -562,6 +626,11 @@ unsafe extern "system" fn wnd_proc(
                 let x = (l_param & 0xFFFF) as i16 as i32;
                 let y = ((l_param >> 16) & 0xFFFF) as i16 as i32;
                 state.handle_mouse_down(x, y);
+                return 0;
+            }
+            WM_MOUSEWHEEL => {
+                let wheel_delta = ((w_param >> 16) & 0xFFFF) as i16 as i32;
+                state.send_scroll((wheel_delta * 48) / 120);
                 return 0;
             }
             WM_KEYDOWN => {
@@ -704,6 +773,7 @@ pub fn run_browser_window() -> std::io::Result<()> {
         omnibox: OmniboxState::new(&initial_url),
         compositor: OwnedCanvas::new(cw, ch),
         hover: None,
+        devtools_open: false,
     });
     state.spawn_and_navigate_tab(initial_id, initial_url, false);
 

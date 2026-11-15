@@ -47,6 +47,7 @@ fn protocol_roundtrips() {
             button: MouseButton::Left,
         },
         BrowserToRenderer::KeyPress { ch: 'G' },
+        BrowserToRenderer::Scroll { delta_y: -120 },
         BrowserToRenderer::Shutdown,
     ];
     for msg in msgs {
@@ -70,6 +71,12 @@ fn protocol_roundtrips() {
         },
         RendererToBrowser::RequestNavigate {
             url: "chrome://newtab".into(),
+        },
+        RendererToBrowser::DevToolsInfo {
+            nav_id: 42,
+            network_summary: "200 OK".into(),
+            dom_dump: "<html>".into(),
+            console_logs: "hello".into(),
         },
     ];
     for r in replies {

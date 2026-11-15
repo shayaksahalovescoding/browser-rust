@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "browser-dom"
+version = "0.1.0"
+dependencies = [
+ "browser-gfx",
+]
+
+[[package]]
 name = "browser-gfx"
 version = "0.1.0"
 
@@ -11,11 +18,25 @@ name = "browser-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "browser-js"
+version = "0.1.0"
+dependencies = [
+ "browser-dom",
+]
+
+[[package]]
+name = "browser-net"
+version = "0.1.0"
+
+[[package]]
 name = "browser-renderer"
 version = "0.1.0"
 dependencies = [
+ "browser-dom",
  "browser-gfx",
  "browser-ipc",
+ "browser-js",
+ "browser-net",
 ]
 
 [[package]]
