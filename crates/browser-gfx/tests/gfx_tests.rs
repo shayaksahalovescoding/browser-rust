@@ -37,12 +37,12 @@ fn rounded_rect_and_text_render_pixels() {
     );
 
     let (w, h) = measure_text(2, "Chrome");
-    assert_eq!((w, h), (96, 16));
+    assert!(w > 20 && h >= 14);
     view.draw_text(10, 12, 2, Color::rgb(255, 255, 255), "Chrome");
     // Some pixel in the text area should now be white
     let mut saw_white = false;
-    for y in 12..28 {
-        for x in 10..26 {
+    for y in 12..32 {
+        for x in 10..60 {
             let idx = (y * 120 + x) * 4;
             if &view.pixels()[idx..idx + 4] == &[255, 255, 255, 255] {
                 saw_white = true;
@@ -50,4 +50,17 @@ fn rounded_rect_and_text_render_pixels() {
         }
     }
     assert!(saw_white);
+}
+
+#[test]
+fn decode_bmp_via_gdiplus() {
+    // Minimal 1x1 24bpp BMP
+    let bmp: [u8; 58] = [
+        b'B', b'M', 58, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1,
+        0, 24, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        0x20, 0x30, 0,
+    ];
+    let img = browser_gfx::decode_image(&bmp).unwrap();
+    assert_eq!((img.width, img.height), (1, 1));
+    assert_eq!(img.bgra, vec![0x10, 0x20, 0x30, 255]);
 }

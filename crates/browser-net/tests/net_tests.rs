@@ -107,6 +107,19 @@ fn http_client_handles_redirects_cookies_chunked_and_gzip() {
 }
 
 #[test]
+fn body_text_decodes_iso_8859_1_charset() {
+    let resp = browser_net::HttpResponse {
+        status: 200,
+        reason: "OK".to_string(),
+        headers: vec![("Content-Type".to_string(), "text/html; charset=ISO-8859-1".to_string())],
+        body: vec![0xA9, b' ', b'2', b'0', b'2', b'6', b' ', 0x97, b' ', b'\xE9'],
+        final_url: "http://example.com/".to_string(),
+        from_cache: false,
+    };
+    assert_eq!(resp.body_text(), "\u{00A9} 2026 \u{2014} \u{00E9}");
+}
+
+#[test]
 #[ignore]
 fn live_https_example_com() {
     let mut client = HttpClient::new();

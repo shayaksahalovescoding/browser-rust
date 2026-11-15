@@ -71,7 +71,10 @@ fn tab_manager_and_ui_hit_testing() {
     );
     assert_eq!(
         layout.hit_test(200, 200),
-        Some(UiAction::ViewportClick { x: 200, y: 120 })
+        Some(UiAction::ViewportClick {
+            x: 200,
+            y: 200 - browser_shell::ui::CHROME_TOP_H
+        })
     );
 
     let mut box_state = OmniboxState::new("chrome://newtab");

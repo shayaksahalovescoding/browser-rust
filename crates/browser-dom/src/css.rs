@@ -1,4 +1,6 @@
-use browser_gfx::Color;
+use std::collections::HashMap;
+
+use browser_gfx::{Color, FontStyle};
 
 use crate::dom::{Document, NodeData, NodeId};
 
@@ -8,6 +10,9 @@ pub enum Display {
     Inline,
     InlineBlock,
     Flex,
+    Table,
+    TableRow,
+    TableCell,
     None,
 }
 
@@ -65,9 +70,19 @@ pub struct ComputedStyle {
     pub background: Option<Color>,
     pub color: Color,
     pub font_scale: i32,
+    pub font_px: i32,
+    pub font_bold: bool,
+    pub font_monospace: bool,
     pub text_align: TextAlign,
+    pub center_blocks: bool,
     pub underline: bool,
     pub list_bullet: bool,
+}
+
+impl ComputedStyle {
+    pub fn font_style(&self) -> FontStyle {
+        FontStyle::new(self.font_px, self.font_bold, self.font_monospace)
+    }
 }
 
 impl Default for ComputedStyle {
@@ -90,7 +105,11 @@ impl Default for ComputedStyle {
             background: None,
             color: Color::rgb(32, 33, 36),
             font_scale: 2,
+            font_px: 14,
+            font_bold: false,
+            font_monospace: false,
             text_align: TextAlign::Left,
+            center_blocks: false,
             underline: false,
             list_bullet: false,
         }
@@ -407,13 +426,17 @@ fn compute_node_recursive(
     let mut st = ComputedStyle {
         color: parent_style.color,
         font_scale: parent_style.font_scale,
+        font_px: parent_style.font_px,
+        font_bold: parent_style.font_bold,
+        font_monospace: parent_style.font_monospace,
         text_align: parent_style.text_align,
+        center_blocks: parent_style.center_blocks,
         underline: parent_style.underline,
         ..ComputedStyle::default()
     };
 
     if let NodeData::Element { tag, attrs } = &doc.nodes[id].data {
-        apply_user_agent_defaults(tag, &mut st);
+        apply_user_agent_defaults(tag, attrs, &mut st);
 
         let mut matched: Vec<((u32, u32, u32), usize, &[Declaration])> = Vec::new();
         let mut order = 0usize;
@@ -447,10 +470,16 @@ fn compute_node_recursive(
     }
 }
 
-fn apply_user_agent_defaults(tag: &str, st: &mut ComputedStyle) {
+fn apply_user_agent_defaults(
+    tag: &str,
+    attrs: &HashMap<String, String>,
+    st: &mut ComputedStyle,
+) {
     match tag {
-        "head" | "style" | "script" | "title" | "meta" | "link" => {
+        "head" | "style" | "script" | "title" | "meta" | "link" | "noscript" | "template"
+        | "svg" | "path" | "g" => {
             st.display = Display::None;
+            return;
         }
         "html" => {
             st.display = Display::Block;
@@ -460,27 +489,64 @@ fn apply_user_agent_defaults(tag: &str, st: &mut ComputedStyle) {
             st.display = Display::Block;
             st.margin = [8.0, 8.0, 8.0, 8.0];
         }
+        "center" => {
+            st.display = Display::Block;
+            st.text_align = TextAlign::Center;
+            st.center_blocks = true;
+        }
         "div" | "section" | "article" | "header" | "footer" | "main" | "nav" | "form"
         | "blockquote" | "pre" => {
             st.display = Display::Block;
             if tag == "pre" {
                 st.background = Some(Color::rgb(245, 247, 250));
                 st.padding = [10.0; 4];
+                st.font_monospace = true;
             }
+        }
+        "code" | "kbd" | "tt" => {
+            st.font_monospace = true;
+        }
+        "b" | "strong" => {
+            st.font_bold = true;
+        }
+        "small" => {
+            st.font_px = 12;
+        }
+        "table" => {
+            st.display = Display::Table;
+        }
+        "tr" => {
+            st.display = Display::TableRow;
+        }
+        "td" | "th" => {
+            st.display = Display::TableCell;
+            st.padding = [2.0, 4.0, 2.0, 4.0];
+            if tag == "th" {
+                st.font_bold = true;
+            }
+        }
+        "tbody" | "thead" | "tfoot" => {
+            st.display = Display::Block;
         }
         "h1" => {
             st.display = Display::Block;
             st.font_scale = 4;
+            st.font_px = 30;
+            st.font_bold = true;
             st.margin = [16.0, 0.0, 12.0, 0.0];
         }
         "h2" => {
             st.display = Display::Block;
             st.font_scale = 3;
+            st.font_px = 22;
+            st.font_bold = true;
             st.margin = [14.0, 0.0, 10.0, 0.0];
         }
         "h3" | "h4" => {
             st.display = Display::Block;
             st.font_scale = 2;
+            st.font_px = 17;
+            st.font_bold = true;
             st.margin = [10.0, 0.0, 8.0, 0.0];
         }
         "p" => {
@@ -508,15 +574,110 @@ fn apply_user_agent_defaults(tag: &str, st: &mut ComputedStyle) {
             st.color = Color::rgb(26, 115, 232);
             st.underline = true;
         }
-        "button" | "input" => {
+        "img" => {
             st.display = Display::InlineBlock;
-            st.padding = [6.0, 12.0, 6.0, 12.0];
+        }
+        "button" => {
+            st.display = Display::InlineBlock;
+            st.padding = [7.0, 16.0, 7.0, 16.0];
+            st.margin = [4.0, 4.0, 4.0, 4.0];
             st.border_width = 1.0;
-            st.border_color = Color::rgb(190, 194, 200);
-            st.border_radius = 6;
-            st.background = Some(Color::rgb(241, 243, 244));
+            st.border_color = Color::rgb(218, 220, 224);
+            st.border_radius = 4;
+            st.background = Some(Color::rgb(248, 249, 250));
+            st.color = Color::rgb(60, 64, 67);
+            st.font_px = 14;
+        }
+        "input" => {
+            let ty = attrs
+                .get("type")
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| "text".to_string());
+            match ty.as_str() {
+                "hidden" => {
+                    st.display = Display::None;
+                    return;
+                }
+                "submit" | "button" | "reset" => {
+                    st.display = Display::InlineBlock;
+                    st.padding = [7.0, 16.0, 7.0, 16.0];
+                    st.margin = [6.0, 4.0, 6.0, 4.0];
+                    st.border_width = 1.0;
+                    st.border_color = Color::rgb(218, 220, 224);
+                    st.border_radius = 4;
+                    st.background = Some(Color::rgb(248, 249, 250));
+                    st.color = Color::rgb(60, 64, 67);
+                    st.font_px = 14;
+                }
+                _ => {
+                    st.display = Display::InlineBlock;
+                    st.padding = [8.0, 14.0, 8.0, 14.0];
+                    st.margin = [4.0, 4.0, 4.0, 4.0];
+                    st.border_width = 1.0;
+                    st.border_color = Color::rgb(218, 220, 224);
+                    st.border_radius = 20;
+                    st.background = Some(Color::rgb(255, 255, 255));
+                    st.color = Color::rgb(32, 33, 36);
+                    st.font_px = 14;
+                    if let Some(sz) = attrs.get("size").and_then(|s| s.trim().parse::<f32>().ok()) {
+                        let px = (sz * 7.8 + 28.0).clamp(120.0, 560.0);
+                        st.width = Dimension::Px(px);
+                    } else {
+                        st.width = Dimension::Px(260.0);
+                    }
+                }
+            }
         }
         _ => {}
+    }
+
+    if attrs.contains_key("hidden") {
+        st.display = Display::None;
+        return;
+    }
+    if let Some(bg) = attrs.get("bgcolor") {
+        if let Some(c) = parse_color(&bg.trim().to_ascii_lowercase()) {
+            st.background = Some(c);
+        }
+    }
+    if let Some(align) = attrs.get("align") {
+        match align.trim().to_ascii_lowercase().as_str() {
+            "center" | "middle" => {
+                st.text_align = TextAlign::Center;
+                st.center_blocks = true;
+            }
+            "right" => st.text_align = TextAlign::Right,
+            "left" => st.text_align = TextAlign::Left,
+            _ => {}
+        }
+    }
+    if matches!(tag, "img" | "table" | "td" | "th") {
+        if let Some(w) = attrs.get("width") {
+            let dim = parse_html_dim(w);
+            if !matches!(dim, Dimension::Auto) {
+                st.width = dim;
+            }
+        }
+        if let Some(h) = attrs.get("height") {
+            let dim = parse_html_dim(h);
+            if !matches!(dim, Dimension::Auto) {
+                st.height = dim;
+            }
+        }
+    }
+}
+
+fn parse_html_dim(raw: &str) -> Dimension {
+    let s = raw.trim();
+    if let Some(pct) = s.strip_suffix('%') {
+        pct.trim()
+            .parse::<f32>()
+            .map(Dimension::Percent)
+            .unwrap_or(Dimension::Auto)
+    } else if let Ok(px) = s.trim_end_matches("px").trim().parse::<f32>() {
+        Dimension::Px(px)
+    } else {
+        Dimension::Auto
     }
 }
 
@@ -529,6 +690,9 @@ fn apply_declaration(prop: &str, val: &str, st: &mut ComputedStyle) {
                 "inline" => Display::Inline,
                 "inline-block" => Display::InlineBlock,
                 "flex" => Display::Flex,
+                "table" => Display::Table,
+                "table-row" => Display::TableRow,
+                "table-cell" => Display::TableCell,
                 "none" => Display::None,
                 _ => st.display,
             };
@@ -577,6 +741,7 @@ fn apply_declaration(prop: &str, val: &str, st: &mut ComputedStyle) {
         }
         "font-size" => {
             if let Some(px) = parse_px(&v) {
+                st.font_px = (px.round() as i32).clamp(10, 48);
                 st.font_scale = if px >= 28.0 {
                     4
                 } else if px >= 20.0 {
@@ -586,6 +751,28 @@ fn apply_declaration(prop: &str, val: &str, st: &mut ComputedStyle) {
                 } else {
                     1
                 };
+            }
+        }
+        "font-weight" => {
+            st.font_bold = v == "bold"
+                || v == "bolder"
+                || v.parse::<i32>().map(|w| w >= 600).unwrap_or(false);
+        }
+        "font-family" => {
+            st.font_monospace = v.contains("mono") || v.contains("consolas") || v.contains("courier");
+        }
+        "font" => {
+            for tok in v.split_whitespace() {
+                if tok == "bold" {
+                    st.font_bold = true;
+                }
+                let size_tok = tok.split('/').next().unwrap_or(tok);
+                if let Some(px) = parse_px(size_tok) {
+                    st.font_px = (px.round() as i32).clamp(10, 48);
+                }
+                if tok.contains("mono") || tok.contains("consolas") || tok.contains("courier") {
+                    st.font_monospace = true;
+                }
             }
         }
         "text-align" => {
@@ -735,6 +922,8 @@ fn parse_dim(v: &str) -> Dimension {
 fn parse_px(v: &str) -> Option<f32> {
     if let Some(n) = v.strip_suffix("px") {
         n.trim().parse().ok()
+    } else if let Some(n) = v.strip_suffix("pt") {
+        n.trim().parse::<f32>().ok().map(|x| x * (4.0 / 3.0))
     } else if let Some(n) = v.strip_suffix("em") {
         n.trim().parse::<f32>().ok().map(|x| x * 16.0)
     } else if let Some(n) = v.strip_suffix("rem") {

@@ -1,5 +1,6 @@
 use crate::color::Color;
-use crate::font::{GLYPH_W, glyph_bitmap};
+use crate::font_win32::{FontStyle, draw_text_clipped_styled, draw_text_styled};
+use crate::scale_to_px;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -143,6 +144,7 @@ impl<'a> CanvasView<'a> {
         );
     }
 
+    /// Smooth 2x2 subpixel anti-aliased rounded rectangle fill.
     pub fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: Color) {
         if rect.w <= 0 || rect.h <= 0 || color.a == 0 {
             return;
@@ -156,25 +158,46 @@ impl<'a> CanvasView<'a> {
         let y0 = rect.y.max(0);
         let x1 = (rect.x + rect.w).min(self.width as i32);
         let y1 = (rect.y + rect.h).min(self.height as i32);
-        let r2 = r * r;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        // Fast interior fill (non-corner band)
+        if y0 + r < y1 - r {
+            self.fill_rect(Rect::new(x0, (rect.y + r).max(y0), x1 - x0, (rect.y + rect.h - r).min(y1) - (rect.y + r).max(y0)), color);
+        }
+
+        let rf = r as f32;
         for y in y0..y1 {
-            let dy = if y < rect.y + r {
-                (rect.y + r) - y - 1
-            } else if y >= rect.y + rect.h - r {
-                y - (rect.y + rect.h - r)
+            let in_top = y < rect.y + r;
+            let in_bot = y >= rect.y + rect.h - r;
+            if !in_top && !in_bot {
+                continue;
+            }
+            let cy = if in_top {
+                (rect.y + r) as f32 - 0.5
             } else {
-                0
+                (rect.y + rect.h - r) as f32 - 0.5
             };
             for x in x0..x1 {
-                let dx = if x < rect.x + r {
-                    (rect.x + r) - x - 1
-                } else if x >= rect.x + rect.w - r {
-                    x - (rect.x + rect.w - r)
-                } else {
-                    0
-                };
-                if dx == 0 || dy == 0 || dx * dx + dy * dy <= r2 {
+                let in_left = x < rect.x + r;
+                let in_right = x >= rect.x + rect.w - r;
+                if !in_left && !in_right {
                     self.set_pixel(x, y, color);
+                    continue;
+                }
+                let cx = if in_left {
+                    (rect.x + r) as f32 - 0.5
+                } else {
+                    (rect.x + rect.w - r) as f32 - 0.5
+                };
+                let dx = (x as f32) - cx;
+                let dy = (y as f32) - cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let cov = (rf + 0.5 - dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = ((color.a as f32) * cov).round() as u8;
+                    self.set_pixel(x, y, Color::rgba(color.r, color.g, color.b, a));
                 }
             }
         }
@@ -189,36 +212,38 @@ impl<'a> CanvasView<'a> {
         let y0 = rect.y.max(0);
         let x1 = (rect.x + rect.w).min(self.width as i32);
         let y1 = (rect.y + rect.h).min(self.height as i32);
-        let r_out2 = r * r;
-        let r_in = (r - 1).max(0);
-        let r_in2 = r_in * r_in;
+        let rf = r as f32;
 
         for y in y0..y1 {
-            let dy = if y < rect.y + r {
-                (rect.y + r) - y - 1
-            } else if y >= rect.y + rect.h - r {
-                y - (rect.y + rect.h - r)
+            let in_top = y < rect.y + r;
+            let in_bot = y >= rect.y + rect.h - r;
+            let cy = if in_top {
+                (rect.y + r) as f32 - 0.5
             } else {
-                0
+                (rect.y + rect.h - r) as f32 - 0.5
             };
             for x in x0..x1 {
-                let dx = if x < rect.x + r {
-                    (rect.x + r) - x - 1
-                } else if x >= rect.x + rect.w - r {
-                    x - (rect.x + rect.w - r)
-                } else {
-                    0
-                };
-                let is_edge = if dx == 0 && dy == 0 {
-                    x == rect.x
-                        || x == rect.x + rect.w - 1
-                        || y == rect.y
-                        || y == rect.y + rect.h - 1
-                } else {
-                    let d2 = dx * dx + dy * dy;
-                    d2 <= r_out2 && (dx == 0 || dy == 0 || d2 >= r_in2)
-                };
-                if is_edge {
+                let in_left = x < rect.x + r;
+                let in_right = x >= rect.x + rect.w - r;
+                if (in_top || in_bot) && (in_left || in_right) {
+                    let cx = if in_left {
+                        (rect.x + r) as f32 - 0.5
+                    } else {
+                        (rect.x + rect.w - r) as f32 - 0.5
+                    };
+                    let dx = (x as f32) - cx;
+                    let dy = (y as f32) - cy;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let cov = (1.0 - (dist - (rf - 0.5)).abs()).clamp(0.0, 1.0);
+                    if cov > 0.0 {
+                        let a = ((color.a as f32) * cov).round() as u8;
+                        self.set_pixel(x, y, Color::rgba(color.r, color.g, color.b, a));
+                    }
+                } else if x == rect.x
+                    || x == rect.x + rect.w - 1
+                    || y == rect.y
+                    || y == rect.y + rect.h - 1
+                {
                     self.set_pixel(x, y, color);
                 }
             }
@@ -260,21 +285,19 @@ impl<'a> CanvasView<'a> {
     }
 
     pub fn draw_text(&mut self, x: i32, y: i32, scale: i32, color: Color, text: &str) {
-        let scale = scale.max(1);
-        let mut pen_x = x;
-        for ch in text.chars() {
-            let rows = glyph_bitmap(ch);
-            for (row_idx, bits) in rows.iter().enumerate() {
-                for col_idx in 0..GLYPH_W {
-                    if (bits >> (7 - col_idx)) & 1 == 1 {
-                        let px = pen_x + (col_idx as i32) * scale;
-                        let py = y + (row_idx as i32) * scale;
-                        self.fill_rect(Rect::new(px, py, scale, scale), color);
-                    }
-                }
-            }
-            pen_x += (GLYPH_W as i32) * scale;
-        }
+        let style = FontStyle::new(scale_to_px(scale), scale >= 3, false);
+        draw_text_styled(self, x, y, style, color, text);
+    }
+
+    pub fn draw_text_styled(
+        &mut self,
+        x: i32,
+        y: i32,
+        style: FontStyle,
+        color: Color,
+        text: &str,
+    ) {
+        draw_text_styled(self, x, y, style, color, text);
     }
 
     pub fn draw_text_clipped(
@@ -286,17 +309,55 @@ impl<'a> CanvasView<'a> {
         text: &str,
         max_width: i32,
     ) {
-        let char_w = (GLYPH_W as i32) * scale.max(1);
-        if max_width < char_w {
+        let style = FontStyle::new(scale_to_px(scale), scale >= 3, false);
+        draw_text_clipped_styled(self, x, y, style, color, text, max_width);
+    }
+
+    pub fn draw_text_clipped_styled(
+        &mut self,
+        x: i32,
+        y: i32,
+        style: FontStyle,
+        color: Color,
+        text: &str,
+        max_width: i32,
+    ) {
+        draw_text_clipped_styled(self, x, y, style, color, text, max_width);
+    }
+
+    /// Alpha-blends a decoded BGRA8 image scaled to `dst_rect`.
+    pub fn blit_bgra_scaled(
+        &mut self,
+        dst_rect: Rect,
+        src_w: u32,
+        src_h: u32,
+        src_pixels: &[u8],
+    ) {
+        if dst_rect.w <= 0 || dst_rect.h <= 0 || src_w == 0 || src_h == 0 {
             return;
         }
-        let max_chars = (max_width / char_w) as usize;
-        let char_count = text.chars().count();
-        if char_count <= max_chars {
-            self.draw_text(x, y, scale, color, text);
-        } else if max_chars >= 2 {
-            let truncated: String = text.chars().take(max_chars - 1).collect();
-            self.draw_text(x, y, scale, color, &(truncated + "~"));
+        let x0 = dst_rect.x.max(0);
+        let y0 = dst_rect.y.max(0);
+        let x1 = (dst_rect.x + dst_rect.w).min(self.width as i32);
+        let y1 = (dst_rect.y + dst_rect.h).min(self.height as i32);
+        for dy in y0..y1 {
+            let sy = (((dy - dst_rect.y) as usize) * (src_h as usize)) / (dst_rect.h as usize);
+            for dx in x0..x1 {
+                let sx = (((dx - dst_rect.x) as usize) * (src_w as usize)) / (dst_rect.w as usize);
+                let sidx = (sy * (src_w as usize) + sx) * 4;
+                if sidx + 4 <= src_pixels.len() {
+                    let a = src_pixels[sidx + 3];
+                    if a > 0 {
+                        let c = Color::rgba(
+                            src_pixels[sidx + 2],
+                            src_pixels[sidx + 1],
+                            src_pixels[sidx],
+                            a,
+                        );
+                        self.set_pixel(dx, dy, c);
+                    }
+                }
+            }
         }
     }
 

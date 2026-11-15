@@ -26,8 +26,37 @@ impl HttpResponse {
     }
 
     pub fn body_text(&self) -> String {
+        if let Some(ct) = self.header("content-type") {
+            let lower = ct.to_ascii_lowercase();
+            if lower.contains("iso-8859-1")
+                || lower.contains("latin1")
+                || lower.contains("windows-1252")
+                || lower.contains("cp1252")
+            {
+                return decode_windows_1252(&self.body);
+            }
+        }
         String::from_utf8_lossy(&self.body).into_owned()
     }
+}
+
+fn decode_windows_1252(bytes: &[u8]) -> String {
+    const C1_MAP: [char; 32] = [
+        '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}',
+        '\u{017D}', '\u{FFFD}', '\u{FFFD}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
+        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
+        '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
+    ];
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            0x00..=0x7F => out.push(b as char),
+            0x80..=0x9F => out.push(C1_MAP[(b - 0x80) as usize]),
+            0xA0..=0xFF => out.push(char::from(b)),
+        }
+    }
+    out
 }
 
 #[derive(Default)]

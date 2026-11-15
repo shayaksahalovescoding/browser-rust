@@ -227,10 +227,18 @@ pub fn decode_entities(s: &str) -> String {
                         "lt" => Some('<'),
                         "gt" => Some('>'),
                         "quot" => Some('"'),
-                        "apos" => Some('\''),
+                        "apos" | "#39" => Some('\''),
                         "nbsp" => Some(' '),
-                        "mdash" | "ndash" => Some('-'),
-                        "copy" => Some('c'),
+                        "mdash" => Some('\u{2014}'),
+                        "ndash" => Some('\u{2013}'),
+                        "copy" => Some('\u{00A9}'),
+                        "reg" => Some('\u{00AE}'),
+                        "trade" => Some('\u{2122}'),
+                        "middot" => Some('\u{00B7}'),
+                        "bull" => Some('\u{2022}'),
+                        "laquo" => Some('\u{00AB}'),
+                        "raquo" => Some('\u{00BB}'),
+                        "hellip" => Some('\u{2026}'),
                         _ if ent.starts_with("#x") || ent.starts_with("#X") => {
                             u32::from_str_radix(&ent[2..], 16)
                                 .ok()

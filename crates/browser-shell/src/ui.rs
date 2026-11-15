@@ -1,29 +1,40 @@
 use browser_gfx::{
-    CanvasView, Color, GLYPH_W, OwnedCanvas, Rect, icons, measure_text,
+    CanvasView, Color, FontStyle, OwnedCanvas, Rect, icons, measure_text_styled,
 };
 
 use crate::process::TabRendererHandle;
 use crate::tabs::{TabManager, TabState, TabStatus};
 
-pub const TAB_STRIP_H: i32 = 38;
-pub const TOOLBAR_H: i32 = 42;
+pub const TAB_STRIP_H: i32 = 40;
+pub const TOOLBAR_H: i32 = 44;
 pub const CHROME_TOP_H: i32 = TAB_STRIP_H + TOOLBAR_H;
-pub const DEVTOOLS_H: i32 = 190;
+pub const DEVTOOLS_H: i32 = 200;
 
-const STRIP_BG: Color = Color::rgb(222, 225, 230);
+const STRIP_BG: Color = Color::rgb(223, 229, 239);
 const TOOLBAR_BG: Color = Color::rgb(255, 255, 255);
-const TAB_INACTIVE: Color = Color::rgb(222, 225, 230);
-const TAB_HOVER: Color = Color::rgb(235, 238, 242);
+const TAB_INACTIVE: Color = Color::rgb(223, 229, 239);
+const TAB_HOVER: Color = Color::rgb(236, 241, 248);
 const TAB_ACTIVE: Color = Color::rgb(255, 255, 255);
-const OMNIBOX_BG: Color = Color::rgb(241, 243, 244);
+const TAB_DIVIDER: Color = Color::rgb(196, 205, 218);
+const OMNIBOX_BG: Color = Color::rgb(237, 242, 250);
+const OMNIBOX_FOCUS_BG: Color = Color::rgb(255, 255, 255);
 const OMNIBOX_FOCUS_BORDER: Color = Color::rgb(26, 115, 232);
-const BORDER_SUBTLE: Color = Color::rgb(218, 220, 224);
+const BORDER_SUBTLE: Color = Color::rgb(222, 226, 230);
 const TEXT_DARK: Color = Color::rgb(32, 33, 36);
 const TEXT_MUTED: Color = Color::rgb(95, 99, 104);
-const ICON_DISABLED: Color = Color::rgb(180, 184, 190);
-const BTN_HOVER: Color = Color::rgb(236, 239, 243);
+const ICON_DISABLED: Color = Color::rgb(189, 193, 198);
+const BTN_HOVER: Color = Color::rgb(235, 240, 248);
 const CRASH_BG: Color = Color::rgb(248, 249, 250);
 const ACCENT_BLUE: Color = Color::rgb(26, 115, 232);
+const SECURE_GREEN: Color = Color::rgb(24, 128, 56);
+
+const TAB_FONT: FontStyle = FontStyle::new(13, false, false);
+const TAB_FONT_ACTIVE: FontStyle = FontStyle::new(13, true, false);
+const OMNIBOX_FONT: FontStyle = FontStyle::new(14, false, false);
+const CHIP_FONT: FontStyle = FontStyle::new(12, true, false);
+const H1_FONT: FontStyle = FontStyle::new(26, true, false);
+const BODY_FONT: FontStyle = FontStyle::new(14, false, false);
+const MONO_FONT: FontStyle = FontStyle::new(12, false, true);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
@@ -138,11 +149,11 @@ impl UiLayout {
         crashed: bool,
         devtools_open: bool,
     ) -> Self {
-        let max_tabs_w = (width - 56).max(120);
+        let max_tabs_w = (width - 64).max(120);
         let tab_w = if tab_count > 0 {
-            (max_tabs_w / tab_count as i32).clamp(90, 220)
+            (max_tabs_w / tab_count as i32).clamp(100, 232)
         } else {
-            180
+            190
         };
 
         let mut tab_rects = Vec::with_capacity(tab_count);
@@ -150,21 +161,22 @@ impl UiLayout {
         let mut x = 8;
         for _ in 0..tab_count {
             let tr = Rect::new(x, 6, tab_w - 4, TAB_STRIP_H - 6);
-            let cr = Rect::new(tr.x + tr.w - 24, tr.y + 8, 16, 16);
+            let cr = Rect::new(tr.x + tr.w - 24, tr.y + 9, 16, 16);
             tab_rects.push(tr);
             close_rects.push(cr);
             x += tab_w;
         }
 
         let new_tab_rect = Rect::new(x + 4, 8, 26, 26);
-        let back_rect = Rect::new(8, TAB_STRIP_H + 6, 30, 30);
-        let forward_rect = Rect::new(42, TAB_STRIP_H + 6, 30, 30);
-        let reload_rect = Rect::new(76, TAB_STRIP_H + 6, 30, 30);
+        let btn_y = TAB_STRIP_H + 7;
+        let back_rect = Rect::new(8, btn_y, 30, 30);
+        let forward_rect = Rect::new(40, btn_y, 30, 30);
+        let reload_rect = Rect::new(72, btn_y, 30, 30);
         let devtools_w = 88;
-        let devtools_rect = Rect::new((width - devtools_w - 10).max(200), TAB_STRIP_H + 6, devtools_w, 30);
-        let omnibox_x = 116;
+        let devtools_rect = Rect::new((width - devtools_w - 10).max(200), btn_y, devtools_w, 30);
+        let omnibox_x = 112;
         let omnibox_w = (devtools_rect.x - omnibox_x - 10).max(80);
-        let omnibox_rect = Rect::new(omnibox_x, TAB_STRIP_H + 6, omnibox_w, 30);
+        let omnibox_rect = Rect::new(omnibox_x, TAB_STRIP_H + 6, omnibox_w, 32);
 
         let drawer_h = if devtools_open { DEVTOOLS_H } else { 0 };
         let viewport_h = (height - CHROME_TOP_H - drawer_h).max(80);
@@ -172,7 +184,7 @@ impl UiLayout {
         let crash_reload_rect = if crashed {
             Some(Rect::new(
                 (width / 2 - 70).max(40),
-                CHROME_TOP_H + viewport_h / 2 + 30,
+                CHROME_TOP_H + viewport_h / 2 + 34,
                 140,
                 36,
             ))
@@ -276,14 +288,38 @@ pub fn render_browser_frame(
         } else {
             TAB_INACTIVE
         };
-        view.fill_rounded_rect(Rect::new(tr.x, tr.y, tr.w, tr.h + 6), 8, bg);
+        if is_active || is_hovered {
+            view.fill_rounded_rect(Rect::new(tr.x, tr.y, tr.w, tr.h + 10), 10, bg);
+        } else if idx + 1 < tabs.tabs().len() && idx + 1 != tabs.active_index() {
+            view.fill_rect(Rect::new(tr.x + tr.w + 1, tr.y + 8, 1, 16), TAB_DIVIDER);
+        }
+
+        // Favicon pill dot
+        let fav_col = if matches!(tab.status, TabStatus::Crashed { .. }) {
+            Color::rgb(217, 48, 37)
+        } else if matches!(tab.status, TabStatus::Loading) {
+            Color::rgb(251, 188, 5)
+        } else if tab.url.starts_with("https://") {
+            ACCENT_BLUE
+        } else {
+            Color::rgb(95, 99, 104)
+        };
+        view.fill_circle(tr.x + 15, tr.y + 17, 5, fav_col);
 
         let title = if matches!(tab.status, TabStatus::Crashed { .. }) {
             "Aw, Snap!"
         } else {
             tab.title.as_str()
         };
-        view.draw_text_clipped(tr.x + 10, tr.y + 9, 2, TEXT_DARK, title, tr.w - 40);
+        let tfont = if is_active { TAB_FONT_ACTIVE } else { TAB_FONT };
+        view.draw_text_clipped_styled(
+            tr.x + 26,
+            tr.y + 8,
+            tfont,
+            TEXT_DARK,
+            title,
+            (tr.w - 54).max(24),
+        );
 
         let close_hover = hover.is_some_and(|(hx, hy)| cr.contains(hx, hy));
         if close_hover {
@@ -342,44 +378,75 @@ pub fn render_browser_frame(
 
     // DevTools chip
     let dt_bg = if devtools_open {
-        Color::rgb(210, 227, 252)
+        Color::rgb(211, 227, 253)
     } else if hover.is_some_and(|(hx, hy)| layout.devtools_rect.contains(hx, hy)) {
         BTN_HOVER
     } else {
         OMNIBOX_BG
     };
-    view.fill_rounded_rect(layout.devtools_rect, 8, dt_bg);
-    view.draw_text(
-        layout.devtools_rect.x + 12,
-        layout.devtools_rect.y + 11,
-        1,
+    view.fill_rounded_rect(layout.devtools_rect, 15, dt_bg);
+    let (dw, dh) = measure_text_styled(CHIP_FONT, "DevTools");
+    view.draw_text_styled(
+        layout.devtools_rect.x + (layout.devtools_rect.w - dw) / 2,
+        layout.devtools_rect.y + (layout.devtools_rect.h - dh) / 2,
+        CHIP_FONT,
         if devtools_open { ACCENT_BLUE } else { TEXT_DARK },
         "DevTools",
     );
 
-    // Omnibox
-    view.fill_rounded_rect(layout.omnibox_rect, 15, OMNIBOX_BG);
+    // Pill Omnibox
+    let ob_bg = if omnibox.focused {
+        OMNIBOX_FOCUS_BG
+    } else {
+        OMNIBOX_BG
+    };
+    view.fill_rounded_rect(layout.omnibox_rect, 16, ob_bg);
     if omnibox.focused {
-        view.stroke_rounded_rect(layout.omnibox_rect, 15, OMNIBOX_FOCUS_BORDER);
+        view.stroke_rounded_rect(layout.omnibox_rect, 16, OMNIBOX_FOCUS_BORDER);
     }
-    let text_x = layout.omnibox_rect.x + 14;
-    let text_y = layout.omnibox_rect.y + 7;
-    let max_text_w = layout.omnibox_rect.w - 28;
+
+    // Security / Route indicator badge inside left side of omnibox
+    let active_url = active_tab.map(|t| t.url.as_str()).unwrap_or("");
+    let badge_col = if active_url.starts_with("https://") {
+        SECURE_GREEN
+    } else if active_url.starts_with("chrome://") {
+        ACCENT_BLUE
+    } else {
+        TEXT_MUTED
+    };
+    let bx = layout.omnibox_rect.x + 15;
+    let by = layout.omnibox_rect.y + 16;
+    view.fill_circle(bx, by, 7, Color::rgb(255, 255, 255));
+    view.fill_circle(bx, by, 5, badge_col);
+
+    let text_x = layout.omnibox_rect.x + 30;
+    let (_, oh) = measure_text_styled(OMNIBOX_FONT, "Ay");
+    let text_y = layout.omnibox_rect.y + (layout.omnibox_rect.h - oh) / 2;
+    let max_text_w = (layout.omnibox_rect.w - 44).max(20);
 
     if omnibox.focused && omnibox.select_all && !omnibox.text.is_empty() {
-        let (tw, _) = measure_text(2, &omnibox.text);
+        let (tw, _) = measure_text_styled(OMNIBOX_FONT, &omnibox.text);
         let sel_w = tw.min(max_text_w);
         view.fill_rect(
-            Rect::new(text_x - 2, text_y - 2, sel_w + 4, 20),
+            Rect::new(text_x - 2, text_y, sel_w + 4, oh),
             Color::rgb(180, 213, 254),
         );
     }
-    view.draw_text_clipped(text_x, text_y, 2, TEXT_DARK, &omnibox.text, max_text_w);
+    view.draw_text_clipped_styled(
+        text_x,
+        text_y,
+        OMNIBOX_FONT,
+        TEXT_DARK,
+        &omnibox.text,
+        max_text_w,
+    );
 
     if omnibox.focused && !omnibox.select_all {
-        let caret_px = text_x + (omnibox.cursor as i32) * (GLYPH_W as i32) * 2;
+        let prefix_end = char_to_byte_idx(&omnibox.text, omnibox.cursor);
+        let (caret_off, _) = measure_text_styled(OMNIBOX_FONT, &omnibox.text[..prefix_end]);
+        let caret_px = text_x + caret_off;
         if caret_px < layout.omnibox_rect.x + layout.omnibox_rect.w - 10 {
-            view.fill_rect(Rect::new(caret_px, text_y - 1, 2, 18), TEXT_DARK);
+            view.fill_rect(Rect::new(caret_px, text_y, 2, oh), ACCENT_BLUE);
         }
     }
 
@@ -420,26 +487,68 @@ fn render_devtools_drawer(
     }
     view.fill_rect(Rect::new(0, top_y, w, drawer_h), Color::rgb(32, 33, 36));
     view.fill_rect(Rect::new(0, top_y, w, 2), ACCENT_BLUE);
-    view.draw_text(12, top_y + 8, 1, Color::rgb(138, 180, 248), "DevTools | DOM & Console (F12 to close)");
+    view.draw_text_styled(
+        14,
+        top_y + 8,
+        CHIP_FONT,
+        Color::rgb(138, 180, 248),
+        "DevTools  •  Elements & Console (F12 to close)",
+    );
 
     let half_w = (w / 2).max(120);
-    view.fill_rect(Rect::new(half_w, top_y + 24, 1, drawer_h - 24), Color::rgb(60, 64, 67));
+    view.fill_rect(
+        Rect::new(half_w, top_y + 28, 1, drawer_h - 28),
+        Color::rgb(60, 64, 67),
+    );
 
     if let Some(dt) = &tab.devtools {
-        view.draw_text_clipped(12, top_y + 26, 1, Color::rgb(129, 201, 149), &dt.network_summary, half_w - 20);
-        let mut y = top_y + 42;
-        for line in dt.dom_dump.lines().take(10) {
-            view.draw_text_clipped(12, y, 1, Color::rgb(232, 234, 237), line, half_w - 20);
-            y += 13;
+        view.draw_text_clipped_styled(
+            14,
+            top_y + 30,
+            MONO_FONT,
+            Color::rgb(129, 201, 149),
+            &dt.network_summary,
+            half_w - 24,
+        );
+        let mut y = top_y + 50;
+        for line in dt.dom_dump.lines().take(9) {
+            view.draw_text_clipped_styled(
+                14,
+                y,
+                MONO_FONT,
+                Color::rgb(232, 234, 237),
+                line,
+                half_w - 24,
+            );
+            y += 16;
         }
-        view.draw_text(half_w + 12, top_y + 26, 1, Color::rgb(253, 214, 99), "Console:");
-        let mut cy = top_y + 42;
-        for line in dt.console_logs.lines().take(10) {
-            view.draw_text_clipped(half_w + 12, cy, 1, Color::rgb(232, 234, 237), line, (w - half_w - 24).max(60));
-            cy += 13;
+        view.draw_text_styled(
+            half_w + 14,
+            top_y + 30,
+            CHIP_FONT,
+            Color::rgb(253, 214, 99),
+            "Console:",
+        );
+        let mut cy = top_y + 50;
+        for line in dt.console_logs.lines().take(9) {
+            view.draw_text_clipped_styled(
+                half_w + 14,
+                cy,
+                MONO_FONT,
+                Color::rgb(232, 234, 237),
+                line,
+                (w - half_w - 26).max(60),
+            );
+            cy += 16;
         }
     } else {
-        view.draw_text(12, top_y + 30, 1, Color::rgb(154, 160, 166), "Waiting for document telemetry...");
+        view.draw_text_styled(
+            14,
+            top_y + 34,
+            MONO_FONT,
+            Color::rgb(154, 160, 166),
+            "Waiting for document telemetry...",
+        );
     }
 }
 
@@ -450,7 +559,12 @@ fn draw_toolbar_button(
     enabled: bool,
 ) {
     if enabled && hover.is_some_and(|(hx, hy)| rect.contains(hx, hy)) {
-        view.fill_circle(rect.x + rect.w / 2, rect.y + rect.h / 2, rect.w / 2, BTN_HOVER);
+        view.fill_circle(
+            rect.x + rect.w / 2,
+            rect.y + rect.h / 2,
+            rect.w / 2,
+            BTN_HOVER,
+        );
     }
 }
 
@@ -466,11 +580,11 @@ fn render_crash_screen(
     view.fill_rect(Rect::new(0, CHROME_TOP_H, w, vp_h), CRASH_BG);
 
     let title = "Aw, Snap!";
-    let (tw, _) = measure_text(3, title);
-    view.draw_text(
+    let (tw, _) = measure_text_styled(H1_FONT, title);
+    view.draw_text_styled(
         ((w - tw) / 2).max(24),
-        CHROME_TOP_H + vp_h / 2 - 56,
-        3,
+        CHROME_TOP_H + vp_h / 2 - 58,
+        H1_FONT,
         TEXT_DARK,
         title,
     );
@@ -479,11 +593,11 @@ fn render_crash_screen(
         Some(code) => format!("Renderer process terminated unexpectedly (exit code {code})."),
         None => "Renderer process terminated unexpectedly. The browser shell stayed safe.".into(),
     };
-    let (mw, _) = measure_text(2, &msg);
-    view.draw_text_clipped(
+    let (mw, _) = measure_text_styled(BODY_FONT, &msg);
+    view.draw_text_clipped_styled(
         ((w - mw) / 2).max(24),
-        CHROME_TOP_H + vp_h / 2 - 12,
-        2,
+        CHROME_TOP_H + vp_h / 2 - 14,
+        BODY_FONT,
         TEXT_MUTED,
         &msg,
         (w - 48).max(100),
@@ -496,13 +610,13 @@ fn render_crash_screen(
         } else {
             ACCENT_BLUE
         };
-        view.fill_rounded_rect(btn, 6, col);
+        view.fill_rounded_rect(btn, 18, col);
         let label = "Reload";
-        let (lw, _) = measure_text(2, label);
-        view.draw_text(
+        let (lw, lh) = measure_text_styled(CHIP_FONT, label);
+        view.draw_text_styled(
             btn.x + (btn.w - lw) / 2,
-            btn.y + 10,
-            2,
+            btn.y + (btn.h - lh) / 2,
+            CHIP_FONT,
             Color::rgb(255, 255, 255),
             label,
         );

@@ -562,7 +562,7 @@ impl AppState {
                     self.invalidate();
                 }
             }
-        } else if code >= 0x20 && code != 0x7F {
+        } else if code == 8 || code == 13 || (code >= 0x20 && code != 0x7F) {
             if let (Some(ch), Some(active_id)) =
                 (char::from_u32(code), self.tabs.active_tab().map(|t| t.id))
             {
