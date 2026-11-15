@@ -672,7 +672,7 @@ pub fn load_document(
 fn find_base_href(doc: &Document) -> Option<String> {
     for node in &doc.nodes {
         if let NodeData::Element { tag, attrs } = &node.data {
-            if tag == "base" {
+            if tag == "base" && !doc.has_ancestor_any(node.id, &["noscript", "template"]) {
                 if let Some(h) = attrs.get("href").filter(|s| !s.trim().is_empty()) {
                     return Some(h.trim().to_string());
                 }
@@ -686,6 +686,7 @@ fn find_meta_refresh_url(doc: &Document) -> Option<String> {
     for node in &doc.nodes {
         if let NodeData::Element { tag, attrs } = &node.data {
             if tag == "meta"
+                && !doc.has_ancestor_any(node.id, &["noscript", "template"])
                 && attrs
                     .get("http-equiv")
                     .is_some_and(|v| v.eq_ignore_ascii_case("refresh"))
@@ -711,30 +712,64 @@ fn find_meta_refresh_url(doc: &Document) -> Option<String> {
     None
 }
 
+fn parse_svg_points(s: &str) -> Vec<(f32, f32)> {
+    let nums: Vec<f32> = s
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| x.parse::<f32>().ok())
+        .collect();
+    nums.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+}
+
 fn rasterize_inline_svgs(doc: &Document, images: &mut HashMap<String, DecodedImage>) {
-    fn walk_svg(doc: &Document, id: NodeId, cur_fill: Color, out: &mut Vec<SvgElement>) {
+    fn walk_svg(
+        doc: &Document,
+        id: NodeId,
+        cur_fill: Color,
+        cur_stroke: Color,
+        cur_sw: f32,
+        out: &mut Vec<SvgElement>,
+    ) {
         if let NodeData::Element { tag, attrs } = &doc.nodes[id].data {
+            let resolve_paint = |val: &str, inherit: Color| -> Color {
+                let vl = val.trim().to_ascii_lowercase();
+                if vl == "none" {
+                    Color::rgba(0, 0, 0, 0)
+                } else if vl == "currentcolor" {
+                    inherit
+                } else {
+                    parse_color(&vl).unwrap_or(inherit)
+                }
+            };
             let own_fill = attrs
                 .get("fill")
-                .and_then(|v| {
-                    let vl = v.trim().to_ascii_lowercase();
-                    if vl == "none" {
-                        Some(Color::rgba(0, 0, 0, 0))
-                    } else if vl == "currentcolor" {
-                        Some(cur_fill)
-                    } else {
-                        parse_color(&vl)
-                    }
-                })
+                .map(|v| resolve_paint(v, cur_fill))
                 .unwrap_or(cur_fill);
+            let own_stroke = attrs
+                .get("stroke")
+                .map(|v| resolve_paint(v, Color::rgb(95, 99, 104)))
+                .unwrap_or(cur_stroke);
+            let own_sw = attrs
+                .get("stroke-width")
+                .and_then(|s| s.trim_end_matches("px").trim().parse::<f32>().ok())
+                .unwrap_or(cur_sw);
 
             match tag.as_str() {
                 "path" => {
                     if let Some(d) = attrs.get("d") {
-                        out.push(SvgElement::Path {
-                            d: d.clone(),
-                            fill: own_fill,
-                        });
+                        if own_fill.a > 0 {
+                            out.push(SvgElement::Path {
+                                d: d.clone(),
+                                fill: own_fill,
+                            });
+                        }
+                        if own_stroke.a > 0 && attrs.contains_key("stroke") {
+                            out.push(SvgElement::StrokePath {
+                                d: d.clone(),
+                                stroke: own_stroke,
+                                stroke_width: own_sw,
+                            });
+                        }
                     }
                 }
                 "rect" => {
@@ -761,10 +796,47 @@ fn rasterize_inline_svgs(doc: &Document, images: &mut HashMap<String, DecodedIma
                         fill: own_fill,
                     });
                 }
+                "line" => {
+                    let x1 = attrs.get("x1").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let y1 = attrs.get("y1").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let x2 = attrs.get("x2").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let y2 = attrs.get("y2").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let st_col = if own_stroke.a > 0 {
+                        own_stroke
+                    } else {
+                        Color::rgb(95, 99, 104)
+                    };
+                    out.push(SvgElement::Polyline {
+                        points: vec![(x1, y1), (x2, y2)],
+                        fill: Color::rgba(0, 0, 0, 0),
+                        stroke: st_col,
+                        stroke_width: own_sw,
+                        closed: false,
+                    });
+                }
+                "polyline" | "polygon" => {
+                    if let Some(pts_s) = attrs.get("points") {
+                        let points = parse_svg_points(pts_s);
+                        if points.len() >= 2 {
+                            let st_col = if attrs.contains_key("stroke") {
+                                own_stroke
+                            } else {
+                                Color::rgba(0, 0, 0, 0)
+                            };
+                            out.push(SvgElement::Polyline {
+                                points,
+                                fill: own_fill,
+                                stroke: st_col,
+                                stroke_width: own_sw,
+                                closed: tag == "polygon",
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
             for &ch in &doc.nodes[id].children {
-                walk_svg(doc, ch, own_fill, out);
+                walk_svg(doc, ch, own_fill, own_stroke, own_sw, out);
             }
         }
     }
@@ -808,7 +880,7 @@ fn rasterize_inline_svgs(doc: &Document, images: &mut HashMap<String, DecodedIma
                 let viewbox = vb.unwrap_or((0.0, 0.0, out_w as f32, out_h as f32));
                 let default_fill = Color::rgb(95, 99, 104);
                 let mut elements = Vec::new();
-                walk_svg(doc, id, default_fill, &mut elements);
+                walk_svg(doc, id, default_fill, Color::rgba(0, 0, 0, 0), 2.0, &mut elements);
                 if let Some(dimg) = rasterize_svg(
                     viewbox,
                     out_w.clamp(16, 512),

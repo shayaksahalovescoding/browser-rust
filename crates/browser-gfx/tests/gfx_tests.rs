@@ -87,6 +87,18 @@ fn svg_rasterizer_and_data_uri_decode() {
             d: "M 4 20 L 12 4 L 20 20 Z".to_string(),
             fill: Color::rgb(52, 168, 83),
         },
+        SvgElement::StrokePath {
+            d: "M 2 12 L 22 12".to_string(),
+            stroke: Color::rgb(217, 48, 37),
+            stroke_width: 2.0,
+        },
+        SvgElement::Polyline {
+            points: vec![(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)],
+            fill: Color::rgba(0, 0, 0, 0),
+            stroke: Color::rgb(95, 99, 104),
+            stroke_width: 2.0,
+            closed: false,
+        },
     ];
     let svg_img = rasterize_svg((0.0, 0.0, 24.0, 24.0), 48, 48, &elements)
         .expect("svg should rasterize");

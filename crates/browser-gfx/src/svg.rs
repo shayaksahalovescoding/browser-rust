@@ -20,6 +20,18 @@ pub enum SvgElement {
         r: f32,
         fill: Color,
     },
+    StrokePath {
+        d: String,
+        stroke: Color,
+        stroke_width: f32,
+    },
+    Polyline {
+        points: Vec<(f32, f32)>,
+        fill: Color,
+        stroke: Color,
+        stroke_width: f32,
+        closed: bool,
+    },
 }
 
 /// Rasterizes vector SVG primitives mapped cleanly from `viewbox` `(vx, vy, vw, vh)` into
@@ -86,6 +98,39 @@ pub fn rasterize_svg(
                     poly.push((pcx + prx * ang.cos(), pcy + pry * ang.sin()));
                 }
                 fill_polygons_nonzero(&mut hi_bgra, sw, sh, &[poly], *fill);
+            }
+            SvgElement::StrokePath {
+                d,
+                stroke,
+                stroke_width,
+            } => {
+                if stroke.a == 0 || *stroke_width <= 0.0 {
+                    continue;
+                }
+                let subpaths = parse_svg_path_subpaths(d, vx, vy, sx, sy);
+                let hw = (*stroke_width * 0.5 * ((sx + sy) * 0.5)).max(1.2);
+                for sp in &subpaths {
+                    stroke_polyline(&mut hi_bgra, sw, sh, sp, false, hw, *stroke);
+                }
+            }
+            SvgElement::Polyline {
+                points,
+                fill,
+                stroke,
+                stroke_width,
+                closed,
+            } => {
+                let mapped: Vec<(f32, f32)> = points
+                    .iter()
+                    .map(|&(px, py)| ((px - vx) * sx, (py - vy) * sy))
+                    .collect();
+                if fill.a > 0 && mapped.len() >= 3 {
+                    fill_polygons_nonzero(&mut hi_bgra, sw, sh, &[mapped.clone()], *fill);
+                }
+                if stroke.a > 0 && *stroke_width > 0.0 && mapped.len() >= 2 {
+                    let hw = (*stroke_width * 0.5 * ((sx + sy) * 0.5)).max(1.2);
+                    stroke_polyline(&mut hi_bgra, sw, sh, &mapped, *closed, hw, *stroke);
+                }
             }
         }
     }
@@ -191,6 +236,53 @@ fn fill_polygons_nonzero(
                 idx += 1;
                 if winding == 0 {
                     break;
+                }
+            }
+        }
+    }
+}
+
+fn stroke_polyline(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    pts: &[(f32, f32)],
+    closed: bool,
+    half_w: f32,
+    stroke: Color,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let seg_count = if closed { pts.len() } else { pts.len() - 1 };
+    let pad = half_w.ceil() as i32 + 1;
+    for i in 0..seg_count {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % pts.len()];
+        let min_x = (x0.min(x1).floor() as i32 - pad).max(0);
+        let max_x = (x0.max(x1).ceil() as i32 + pad).min(w as i32 - 1);
+        let min_y = (y0.min(y1).floor() as i32 - pad).max(0);
+        let max_y = (y0.max(y1).ceil() as i32 + pad).min(h as i32 - 1);
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len_sq = dx * dx + dy * dy;
+        for py in min_y..=max_y {
+            let fy = py as f32 + 0.5;
+            for px in min_x..=max_x {
+                let fx = px as f32 + 0.5;
+                let t = if len_sq > 0.0001 {
+                    (((fx - x0) * dx + (fy - y0) * dy) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let cx = x0 + t * dx;
+                let cy = y0 + t * dy;
+                let dist = ((fx - cx) * (fx - cx) + (fy - cy) * (fy - cy)).sqrt();
+                if dist <= half_w {
+                    let off = ((py as usize) * (w as usize) + (px as usize)) * 4;
+                    let dst = [buf[off], buf[off + 1], buf[off + 2], buf[off + 3]];
+                    let blended = stroke.blend_over(dst);
+                    buf[off..off + 4].copy_from_slice(&blended);
                 }
             }
         }

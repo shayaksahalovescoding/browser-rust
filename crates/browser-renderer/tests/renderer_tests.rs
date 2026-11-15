@@ -127,6 +127,21 @@ fn live_https_google_and_example_render_check() {
         hn.hits.len()
     );
 
+    let wiki = load_document(&mut http, "https://en.wikipedia.org/wiki/Web_browser", 1280, 720).unwrap();
+    assert!(
+        wiki.title.contains("Web browser") && wiki.hits.iter().filter(|h| h.href.is_some()).count() >= 10,
+        "wikipedia load failed or unclickable: title={}, hits={}",
+        wiki.title,
+        wiki.hits.len()
+    );
+
+    let wiki_search = load_document(&mut http, "https://en.wikipedia.org/w/index.php?search=rust", 1280, 720).unwrap();
+    assert!(
+        wiki_search.hits.iter().filter(|h| h.href.is_some()).count() >= 5,
+        "expected clickable Wikipedia search results, got {}",
+        wiki_search.hits.len()
+    );
+
     let g = load_document(&mut http, "https://www.google.com/", 1280, 720).unwrap();
     assert!(
         !g.images.is_empty(),

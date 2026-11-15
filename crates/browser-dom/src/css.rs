@@ -1028,6 +1028,10 @@ fn parse_px(v: &str) -> Option<f32> {
         n.trim().parse::<f32>().ok().map(|x| x * 16.0)
     } else if let Some(n) = v.strip_suffix("rem") {
         n.trim().parse::<f32>().ok().map(|x| x * 16.0)
+    } else if let Some(n) = v.strip_suffix("vh") {
+        n.trim().parse::<f32>().ok().map(|x| x * 7.2)
+    } else if let Some(n) = v.strip_suffix("vw") {
+        n.trim().parse::<f32>().ok().map(|x| x * 12.8)
     } else if v == "0" {
         Some(0.0)
     } else {
@@ -1036,6 +1040,12 @@ fn parse_px(v: &str) -> Option<f32> {
 }
 
 pub fn parse_color(v: &str) -> Option<Color> {
+    let v = v.trim();
+    if let Some(inner) = v.strip_prefix("light-dark(").and_then(|s| s.strip_suffix(')')) {
+        if let Some((light, _)) = inner.split_once(',') {
+            return parse_color(light.trim());
+        }
+    }
     if let Some(hex) = v.strip_prefix('#') {
         if hex.len() == 6 {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;

@@ -347,18 +347,60 @@ fn render_search_placeholder(
 ) -> String {
     canvas.clear(BG_LIGHT);
     let w = canvas.width() as i32;
-    canvas.draw_text_styled(40, 36, H1_FONT, TEXT_PRIMARY, "Search Query");
-    draw_back_home_chip(canvas, 40, 78, hover_pos, links);
-    canvas.draw_text_clipped_styled(40, 134, TITLE_FONT, ACCENT_BLUE, url, (w - 80).max(100));
-    canvas.draw_text_clipped_styled(
+    let raw_q = url
+        .split_once("q=")
+        .map(|(_, q)| q)
+        .unwrap_or("")
+        .split('&')
+        .next()
+        .unwrap_or("");
+    let display_q = raw_q.replace('+', " ");
+
+    canvas.draw_text_styled(
         40,
-        166,
-        BODY_FONT,
-        TEXT_MUTED,
-        "Enter a full URL (e.g. https://www.google.com) or click chrome://demo.",
-        (w - 80).max(100),
+        36,
+        H1_FONT,
+        TEXT_PRIMARY,
+        &format!("Search: {display_q}"),
     );
-    "Search".into()
+    draw_back_home_chip(canvas, 40, 82, hover_pos, links);
+
+    let engines: [(&str, &str, String, Color); 3] = [
+        (
+            "D",
+            "DuckDuckGo Web Search (HTML)",
+            format!("https://html.duckduckgo.com/html/?q={raw_q}"),
+            Color::rgb(222, 88, 51),
+        ),
+        (
+            "W",
+            "Wikipedia Encyclopedia",
+            format!("https://en.wikipedia.org/w/index.php?search={raw_q}"),
+            Color::rgb(51, 102, 204),
+        ),
+        (
+            "G",
+            "Google Search Home",
+            "https://www.google.com/".to_string(),
+            Color::rgb(66, 133, 244),
+        ),
+    ];
+
+    let card_w = (w - 80).clamp(280, 560);
+    let mut y = 140;
+    for (badge, label, target_url, col) in engines {
+        let rect = Rect::new(40, y, card_w, 56);
+        let hovered = hover_pos.is_some_and(|(px, py)| rect.contains(px, py));
+        canvas.fill_rounded_rect(rect, 10, if hovered { CARD_HOVER } else { CARD_BG });
+        canvas.stroke_rounded_rect(rect, 10, if hovered { col } else { CARD_BORDER });
+        canvas.fill_circle(68, y + 28, 14, col);
+        canvas.draw_text_styled(63, y + 20, SMALL_FONT, Color::rgb(255, 255, 255), badge);
+        canvas.draw_text_clipped_styled(94, y + 10, TITLE_FONT, TEXT_PRIMARY, label, card_w - 110);
+        canvas.draw_text_clipped_styled(94, y + 32, SMALL_FONT, TEXT_MUTED, &target_url, card_w - 110);
+        links.push((rect, target_url));
+        y += 70;
+    }
+    format!("Search: {display_q}")
 }
 
 pub fn render_network_error(canvas: &mut CanvasView<'_>, url: &str, err: &str) -> String {

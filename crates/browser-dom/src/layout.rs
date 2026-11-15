@@ -483,6 +483,7 @@ fn layout_node(
         );
     } else {
         let mut inline_tokens: Vec<InlineToken> = Vec::new();
+        let mut inline_trailing_ws = true;
         let children = &doc.nodes[id].children;
         for &ch in children {
             let ch_st = &styles[ch];
@@ -499,12 +500,21 @@ fn layout_node(
                     &mut text_runs,
                     &mut children_boxes,
                 );
+                inline_trailing_ws = true;
                 let cbox = layout_node(doc, styles, ch, content_x, cur_y, content_w, active_href);
                 let cm_bottom = ch_st.margin[2].round() as i32;
                 cur_y = cbox.rect.y + cbox.rect.h + cm_bottom;
                 children_boxes.push(cbox);
             } else {
-                collect_inline_tokens(doc, styles, ch, content_w, active_href, &mut inline_tokens);
+                collect_inline_tokens_inner(
+                    doc,
+                    styles,
+                    ch,
+                    content_w,
+                    active_href,
+                    &mut inline_tokens,
+                    &mut inline_trailing_ws,
+                );
             }
         }
         flush_inline_tokens(
@@ -785,18 +795,20 @@ enum InlineToken {
         underline: bool,
         node_id: NodeId,
         href: Option<String>,
+        join_prev: bool,
     },
     InlineBox(Box<LayoutBox>),
     Br,
 }
 
-fn collect_inline_tokens(
+fn collect_inline_tokens_inner(
     doc: &Document,
     styles: &[ComputedStyle],
     id: NodeId,
     avail_w: i32,
     inherited_href: Option<&str>,
     out: &mut Vec<InlineToken>,
+    trailing_ws: &mut bool,
 ) {
     let st = &styles[id];
     if st.display == Display::None {
@@ -804,10 +816,30 @@ fn collect_inline_tokens(
     }
     match &doc.nodes[id].data {
         NodeData::Text(raw) => {
+            if raw.is_empty() {
+                return;
+            }
             let parent_id = doc.nodes[id].parent.unwrap_or(0);
             let pst = &styles[parent_id];
             let font = pst.font_style();
-            for word in raw.split_whitespace() {
+            let starts_ws = raw.chars().next().is_some_and(|c| c.is_whitespace());
+            let ends_ws = raw.chars().last().is_some_and(|c| c.is_whitespace());
+            let mut words = raw.split_whitespace().peekable();
+            if words.peek().is_none() {
+                *trailing_ws = true;
+                return;
+            }
+            for (idx, word) in words.enumerate() {
+                let join_prev = if idx > 0 {
+                    false
+                } else {
+                    match out.last() {
+                        Some(InlineToken::Word { .. }) => !starts_ws && !*trailing_ws,
+                        Some(InlineToken::InlineBox(_)) => !starts_ws
+                            && word.starts_with(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']')),
+                        _ => false,
+                    }
+                };
                 out.push(InlineToken::Word {
                     text: word.to_string(),
                     font,
@@ -815,12 +847,15 @@ fn collect_inline_tokens(
                     underline: pst.underline,
                     node_id: parent_id,
                     href: inherited_href.map(str::to_string),
+                    join_prev,
                 });
             }
+            *trailing_ws = ends_ws;
         }
         NodeData::Element { tag, .. } => {
             if tag == "br" {
                 out.push(InlineToken::Br);
+                *trailing_ws = true;
                 return;
             }
             let own_href = if tag == "a" {
@@ -832,10 +867,19 @@ fn collect_inline_tokens(
             if st.display == Display::InlineBlock {
                 let ibox = layout_inline_block_element(doc, styles, id, avail_w, next_href);
                 out.push(InlineToken::InlineBox(Box::new(ibox)));
+                *trailing_ws = false;
                 return;
             }
             for &ch in &doc.nodes[id].children {
-                collect_inline_tokens(doc, styles, ch, avail_w, next_href, out);
+                collect_inline_tokens_inner(
+                    doc,
+                    styles,
+                    ch,
+                    avail_w,
+                    next_href,
+                    out,
+                    trailing_ws,
+                );
             }
         }
         NodeData::Document => {}
@@ -883,9 +927,14 @@ fn flush_inline_tokens(
                 underline,
                 node_id,
                 href,
+                join_prev,
             } => {
                 let (ww, wh) = measure_text_styled(font, &text);
-                let space_w = measure_text_styled(font, " ").0.max(4);
+                let space_w = if join_prev {
+                    0
+                } else {
+                    measure_text_styled(font, " ").0.max(4)
+                };
                 let extra_space = if line_items.is_empty() { 0 } else { space_w };
                 if !line_items.is_empty() && line_w + extra_space + ww > content_w {
                     lines.push((

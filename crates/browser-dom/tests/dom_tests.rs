@@ -187,3 +187,44 @@ fn flex_shifted_links_card_links_and_textarea_controls_align() {
         .expect("textarea with display: flex must still emit TextInput control");
     assert!(q_box.rect.w >= 300);
 }
+
+#[test]
+fn noscript_styles_ignored_and_inline_punctuation_glued() {
+    let html = r#"
+        <html>
+          <head></head>
+          <body>
+            <noscript>
+              <style>div,p,span{display:none}</style>
+              <meta http-equiv="refresh" content="0;url=/enablejs">
+            </noscript>
+            <div id="main"><p>Click <b>Settings</b>.</p></div>
+          </body>
+        </html>
+    "#;
+    let doc = parse_html(html);
+    let css = doc.collect_style_blocks();
+    assert!(css.trim().is_empty(), "style inside <noscript> leaked: {css}");
+
+    let sheet = Stylesheet::parse(&css);
+    let styles = compute_styles(&doc, &[sheet]);
+    let (layout, _, _) = LayoutEngine::layout(&doc, &styles, 800, 600);
+
+    fn collect_runs(b: &LayoutBox, out: &mut Vec<(String, i32, i32)>) {
+        for r in &b.text_runs {
+            out.push((r.text.clone(), r.x, r.w));
+        }
+        for c in &b.children {
+            collect_runs(c, out);
+        }
+    }
+    let mut runs = Vec::new();
+    collect_runs(&layout, &mut runs);
+    let settings = runs.iter().find(|r| r.0 == "Settings").expect("Settings run missing");
+    let dot = runs.iter().find(|r| r.0 == ".").expect("period run missing");
+    assert_eq!(
+        dot.1,
+        settings.1 + settings.2,
+        "period should glue directly onto Settings: settings={settings:?}, dot={dot:?}"
+    );
+}

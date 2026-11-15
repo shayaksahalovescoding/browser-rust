@@ -158,11 +158,24 @@ impl Document {
             .filter(|s| !s.is_empty())
     }
 
+    pub fn has_ancestor_any(&self, id: NodeId, tags: &[&str]) -> bool {
+        let mut cur = self.nodes.get(id).and_then(|n| n.parent);
+        while let Some(pid) = cur {
+            if let Some(tag) = self.tag_name(pid) {
+                if tags.iter().any(|t| *t == tag) {
+                    return true;
+                }
+            }
+            cur = self.nodes.get(pid).and_then(|n| n.parent);
+        }
+        false
+    }
+
     pub fn collect_style_blocks(&self) -> String {
         let mut out = String::new();
         for n in &self.nodes {
             if let NodeData::Element { tag, .. } = &n.data {
-                if tag == "style" {
+                if tag == "style" && !self.has_ancestor_any(n.id, &["noscript", "template"]) {
                     out.push_str(&self.text_content(n.id));
                     out.push('\n');
                 }
@@ -175,7 +188,7 @@ impl Document {
         let mut links = Vec::new();
         for n in &self.nodes {
             if let NodeData::Element { tag, attrs } = &n.data {
-                if tag == "link" {
+                if tag == "link" && !self.has_ancestor_any(n.id, &["noscript", "template"]) {
                     let is_css = attrs
                         .get("rel")
                         .is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet"));
@@ -194,7 +207,7 @@ impl Document {
         let mut scripts = Vec::new();
         for n in &self.nodes {
             if let NodeData::Element { tag, attrs } = &n.data {
-                if tag == "script" {
+                if tag == "script" && !self.has_ancestor_any(n.id, &["noscript", "template"]) {
                     let src = attrs.get("src").cloned();
                     let inline = self.text_content(n.id);
                     scripts.push((src, inline));
