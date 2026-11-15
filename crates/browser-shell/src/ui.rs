@@ -257,6 +257,7 @@ pub fn render_browser_frame(
     tabs: &TabManager,
     omnibox: &OmniboxState,
     hover: Option<(i32, i32)>,
+    hover_url: Option<&str>,
     renderer: Option<&TabRendererHandle>,
     devtools_open: bool,
 ) {
@@ -405,19 +406,19 @@ pub fn render_browser_frame(
         view.stroke_rounded_rect(layout.omnibox_rect, 16, OMNIBOX_FOCUS_BORDER);
     }
 
-    // Security / Route indicator badge inside left side of omnibox
+    // Security / Route indicator icon inside left side of omnibox
     let active_url = active_tab.map(|t| t.url.as_str()).unwrap_or("");
-    let badge_col = if active_url.starts_with("https://") {
-        SECURE_GREEN
-    } else if active_url.starts_with("chrome://") {
-        ACCENT_BLUE
-    } else {
-        TEXT_MUTED
-    };
-    let bx = layout.omnibox_rect.x + 15;
+    let bx = layout.omnibox_rect.x + 16;
     let by = layout.omnibox_rect.y + 16;
-    view.fill_circle(bx, by, 7, Color::rgb(255, 255, 255));
-    view.fill_circle(bx, by, 5, badge_col);
+    if active_url.starts_with("https://") {
+        view.fill_circle(bx, by, 10, Color::rgb(255, 255, 255));
+        icons::draw_lock_icon(&mut view, bx, by, SECURE_GREEN);
+    } else if active_url.starts_with("chrome://") {
+        view.fill_circle(bx, by, 10, Color::rgb(255, 255, 255));
+        icons::draw_search_icon(&mut view, bx, by, ACCENT_BLUE);
+    } else {
+        icons::draw_search_icon(&mut view, bx, by, TEXT_MUTED);
+    }
 
     let text_x = layout.omnibox_rect.x + 30;
     let (_, oh) = measure_text_styled(OMNIBOX_FONT, "Ay");
@@ -464,6 +465,24 @@ pub fn render_browser_frame(
                     view.fill_rect(
                         Rect::new(0, CHROME_TOP_H, w, layout.viewport_h),
                         Color::rgb(255, 255, 255),
+                    );
+                }
+                if let Some(url) = hover_url.filter(|u| !u.is_empty()) {
+                    let max_pill_w = (w / 2).clamp(180, 560);
+                    let (tw, th) = measure_text_styled(CHIP_FONT, url);
+                    let pill_w = (tw + 18).min(max_pill_w);
+                    let pill_h = (th + 8).max(22);
+                    let pill_y = CHROME_TOP_H + layout.viewport_h - pill_h;
+                    let pill = Rect::new(0, pill_y, pill_w, pill_h);
+                    view.fill_rounded_rect(pill, 4, Color::rgb(241, 243, 244));
+                    view.stroke_rounded_rect(pill, 4, BORDER_SUBTLE);
+                    view.draw_text_clipped_styled(
+                        8,
+                        pill_y + (pill_h - th) / 2,
+                        CHIP_FONT,
+                        TEXT_MUTED,
+                        url,
+                        pill_w - 14,
                     );
                 }
             }

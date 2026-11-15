@@ -233,9 +233,17 @@ fn parse_rule_block(s: &str, out: &mut Vec<Rule>) {
         let body = &s[body_start..body_end];
 
         if header.starts_with('@') {
-            if header.to_ascii_lowercase().starts_with("@media")
-                && !header.to_ascii_lowercase().contains("print")
-                && !header.to_ascii_lowercase().contains("prefers-color-scheme: dark")
+            let hdr_compact: String = header
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if hdr_compact.starts_with("@media")
+                && !hdr_compact.contains("print")
+                && !hdr_compact.contains("prefers-color-scheme:dark")
+                && !hdr_compact.contains("max-width:3")
+                && !hdr_compact.contains("max-width:4")
+                && !hdr_compact.contains("max-width:5")
             {
                 parse_rule_block(body, out);
             }
@@ -305,8 +313,29 @@ fn parse_complex_selector(sel: &str) -> Option<ComplexSelector> {
 }
 
 fn parse_simple_selector(raw: &str) -> Option<SimpleSelector> {
-    // Strip pseudo-classes like :hover / :visited for basic matching
-    let s = raw.split(':').next().unwrap_or("").trim();
+    let raw_l = raw.to_ascii_lowercase();
+    if raw_l.contains(":hover")
+        || raw_l.contains(":active")
+        || raw_l.contains(":focus")
+        || raw_l.contains("::before")
+        || raw_l.contains("::after")
+        || raw_l.contains(":checked")
+        || raw_l.contains(":disabled")
+        || raw_l.contains(":visited")
+        || raw_l.contains(":empty")
+        || raw_l.contains(":target")
+        || raw_l.contains(":-webkit")
+        || raw_l.contains("::-webkit")
+    {
+        return None;
+    }
+    // Strip attribute selectors [..] and safe pseudo-classes for base matching
+    let no_attr = if let Some(idx) = raw.find('[') {
+        &raw[..idx]
+    } else {
+        raw
+    };
+    let s = no_attr.split(':').next().unwrap_or("").trim();
     if s.is_empty() {
         return None;
     }
@@ -477,8 +506,34 @@ fn apply_user_agent_defaults(
 ) {
     match tag {
         "head" | "style" | "script" | "title" | "meta" | "link" | "noscript" | "template"
-        | "svg" | "path" | "g" => {
+        | "path" | "g" | "rect" | "circle" | "ellipse" | "polygon" | "polyline" | "line"
+        | "defs" | "use" | "lineargradient" | "radialgradient" | "stop" | "clippath"
+        | "mask" => {
             st.display = Display::None;
+            return;
+        }
+        "svg" => {
+            let w_zero = attrs.get("width").is_some_and(|v| v.trim() == "0" || v.trim() == "0px");
+            let h_zero = attrs.get("height").is_some_and(|v| v.trim() == "0" || v.trim() == "0px");
+            let hidden_aria = attrs.get("aria-hidden").is_some_and(|v| v == "true")
+                && attrs.get("width").is_none();
+            if w_zero || h_zero || hidden_aria {
+                st.display = Display::None;
+                return;
+            }
+            st.display = Display::InlineBlock;
+            if let Some(w) = attrs.get("width") {
+                let d = parse_html_dim(w);
+                if !matches!(d, Dimension::Auto) {
+                    st.width = d;
+                }
+            }
+            if let Some(h) = attrs.get("height") {
+                let d = parse_html_dim(h);
+                if !matches!(d, Dimension::Auto) {
+                    st.height = d;
+                }
+            }
             return;
         }
         "html" => {
@@ -576,6 +631,18 @@ fn apply_user_agent_defaults(
         }
         "img" => {
             st.display = Display::InlineBlock;
+        }
+        "textarea" => {
+            st.display = Display::InlineBlock;
+            st.padding = [8.0, 14.0, 8.0, 14.0];
+            st.margin = [4.0, 4.0, 4.0, 4.0];
+            st.border_width = 1.0;
+            st.border_color = Color::rgb(218, 220, 224);
+            st.border_radius = 18;
+            st.background = Some(Color::rgb(255, 255, 255));
+            st.color = Color::rgb(32, 33, 36);
+            st.font_px = 14;
+            st.width = Dimension::Px(420.0);
         }
         "button" => {
             st.display = Display::InlineBlock;
@@ -681,14 +748,25 @@ fn parse_html_dim(raw: &str) -> Dimension {
     }
 }
 
+fn unwrap_css_var(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed.strip_prefix("var(").and_then(|s| s.strip_suffix(')')) {
+        if let Some((_, fallback)) = inner.split_once(',') {
+            return fallback.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn apply_declaration(prop: &str, val: &str, st: &mut ComputedStyle) {
-    let v = val.trim().to_ascii_lowercase();
+    let unwrapped = unwrap_css_var(val);
+    let v = unwrapped.trim().to_ascii_lowercase();
     match prop {
         "display" => {
             st.display = match v.as_str() {
-                "block" => Display::Block,
+                "block" | "grid" | "list-item" => Display::Block,
                 "inline" => Display::Inline,
-                "inline-block" => Display::InlineBlock,
+                "inline-block" | "inline-flex" | "inline-grid" => Display::InlineBlock,
                 "flex" => Display::Flex,
                 "table" => Display::Table,
                 "table-row" => Display::TableRow,
@@ -696,6 +774,28 @@ fn apply_declaration(prop: &str, val: &str, st: &mut ComputedStyle) {
                 "none" => Display::None,
                 _ => st.display,
             };
+        }
+        "visibility" => {
+            if v == "hidden" || v == "collapse" {
+                st.display = Display::None;
+            }
+        }
+        "opacity" => {
+            if let Ok(op) = v.parse::<f32>() {
+                if op <= 0.01 {
+                    st.display = Display::None;
+                }
+            }
+        }
+        "float" => {
+            if (v == "left" || v == "right") && st.display == Display::Block {
+                st.display = Display::InlineBlock;
+            }
+        }
+        "list-style" | "list-style-type" => {
+            if v == "none" {
+                st.list_bullet = false;
+            }
         }
         "flex-direction" => {
             if v == "column" {
@@ -974,13 +1074,24 @@ pub fn parse_color(v: &str) -> Option<Color> {
     match v {
         "black" => Some(Color::rgb(0, 0, 0)),
         "white" => Some(Color::rgb(255, 255, 255)),
-        "red" => Some(Color::rgb(220, 38, 38)),
-        "green" => Some(Color::rgb(22, 163, 74)),
-        "blue" => Some(Color::rgb(37, 99, 235)),
+        "whitesmoke" => Some(Color::rgb(245, 245, 245)),
+        "silver" => Some(Color::rgb(192, 192, 192)),
+        "lightgray" | "lightgrey" => Some(Color::rgb(211, 211, 211)),
+        "darkgray" | "darkgrey" => Some(Color::rgb(169, 169, 169)),
         "gray" | "grey" => Some(Color::rgb(107, 114, 128)),
+        "red" => Some(Color::rgb(220, 38, 38)),
+        "crimson" => Some(Color::rgb(220, 20, 60)),
+        "green" => Some(Color::rgb(22, 163, 74)),
+        "lime" => Some(Color::rgb(0, 200, 83)),
+        "teal" => Some(Color::rgb(0, 128, 128)),
+        "blue" => Some(Color::rgb(26, 115, 232)),
+        "navy" => Some(Color::rgb(0, 0, 128)),
+        "skyblue" => Some(Color::rgb(135, 206, 235)),
         "orange" => Some(Color::rgb(234, 88, 12)),
         "yellow" => Some(Color::rgb(234, 179, 8)),
+        "gold" => Some(Color::rgb(255, 215, 0)),
         "purple" => Some(Color::rgb(147, 51, 234)),
+        "indigo" => Some(Color::rgb(75, 0, 130)),
         _ => None,
     }
 }

@@ -202,3 +202,42 @@ pub fn decode_image(bytes: &[u8]) -> Option<DecodedImage> {
         })
     }
 }
+
+/// Decodes a `data:image/...;base64,<payload>` inline image URI via base64 + GDI+.
+pub fn decode_data_uri(uri: &str) -> Option<DecodedImage> {
+    let trimmed = uri.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("data:image/") {
+        return None;
+    }
+    let (meta, data_part) = trimmed.split_once(',')?;
+    if !meta.to_ascii_lowercase().contains(";base64") {
+        return None;
+    }
+    let bytes = decode_base64(data_part)?;
+    decode_image(&bytes)
+}
+
+pub fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for b in input.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            b' ' | b'\r' | b'\n' | b'\t' => continue,
+            _ => return None,
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}

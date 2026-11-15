@@ -78,6 +78,10 @@ pub enum RendererToBrowser {
         dom_dump: String,
         console_logs: String,
     },
+    CursorChanged {
+        cursor: u8,
+        hover_url: Option<String>,
+    },
 }
 
 struct Encoder(Vec<u8>);
@@ -303,6 +307,18 @@ impl RendererToBrowser {
                 e.str(console_logs);
                 e.finish()
             }
+            Self::CursorChanged { cursor, hover_url } => {
+                let mut e = Encoder::new(6);
+                e.u8(*cursor);
+                match hover_url {
+                    Some(u) => {
+                        e.u8(1);
+                        e.str(u);
+                    }
+                    None => e.u8(0),
+                }
+                e.finish()
+            }
         }
     }
 
@@ -328,6 +344,11 @@ impl RendererToBrowser {
                 dom_dump: d.str()?,
                 console_logs: d.str()?,
             },
+            6 => {
+                let cursor = d.u8()?;
+                let hover_url = if d.u8()? != 0 { Some(d.str()?) } else { None };
+                Self::CursorChanged { cursor, hover_url }
+            }
             tag => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

@@ -78,6 +78,14 @@ fn protocol_roundtrips() {
             dom_dump: "<html>".into(),
             console_logs: "hello".into(),
         },
+        RendererToBrowser::CursorChanged {
+            cursor: 1,
+            hover_url: Some("https://example.com/".into()),
+        },
+        RendererToBrowser::CursorChanged {
+            cursor: 0,
+            hover_url: None,
+        },
     ];
     for r in replies {
         let bytes = r.encode();

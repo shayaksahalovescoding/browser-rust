@@ -11,7 +11,7 @@ const TRANSPARENT: i32 = 1;
 const DEFAULT_CHARSET: u32 = 1;
 const OUT_DEFAULT_PRECIS: u32 = 0;
 const CLIP_DEFAULT_PRECIS: u32 = 0;
-const ANTIALIASED_QUALITY: u32 = 4;
+const CLEARTYPE_QUALITY: u32 = 5;
 const DEFAULT_PITCH: u32 = 0;
 const FW_NORMAL: i32 = 400;
 const FW_SEMIBOLD: i32 = 600;
@@ -198,7 +198,7 @@ impl FontScratch {
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                ANTIALIASED_QUALITY,
+                CLEARTYPE_QUALITY,
                 DEFAULT_PITCH,
                 wide.as_ptr(),
             )
@@ -227,32 +227,61 @@ impl FontScratch {
         if tw <= 0 || th <= 0 {
             return;
         }
-        let pad_w = (tw + 8).min(canvas.width() as i32 + 16).max(16);
-        let pad_h = (th + 4).max(16);
-        self.ensure_dib(pad_w, pad_h);
+        let dst_w = canvas.width() as i32;
+        let dst_h = canvas.height() as i32;
+        let clip_x0 = x.max(0);
+        let clip_y0 = y.max(0);
+        let clip_x1 = (x + tw + 6).min(dst_w);
+        let clip_y1 = (y + th + 4).min(dst_h);
+        if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
+            return;
+        }
+
+        let box_w = clip_x1 - clip_x0;
+        let box_h = clip_y1 - clip_y0;
+        self.ensure_dib(box_w, box_h);
         if self.bits.is_null() {
             return;
         }
 
-        // Clear only the sub-rectangle we will draw into
+        // Copy exact destination background pixels into scratch DIB so ClearType blends against real scene colors.
         let stride = self.dib_w as usize;
-        let clear_w = pad_w.min(self.dib_w) as usize;
-        let clear_h = pad_h.min(self.dib_h) as usize;
-        unsafe {
-            for row in 0..clear_h {
-                std::ptr::write_bytes(self.bits.add(row * stride * 4), 0, clear_w * 4);
+        let canvas_stride = canvas.width() as usize;
+        {
+            let dst_ro = canvas.pixels();
+            for row in 0..box_h as usize {
+                let cy = (clip_y0 as usize) + row;
+                let src_off = (cy * canvas_stride + (clip_x0 as usize)) * 4;
+                let dst_off = row * stride * 4;
+                let row_bytes = (box_w as usize) * 4;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        dst_ro.as_ptr().add(src_off),
+                        self.bits.add(dst_off),
+                        row_bytes,
+                    );
+                }
             }
+        }
+
+        let colorref = ((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32);
+        let draw_off_x = x - clip_x0;
+        let draw_off_y = y - clip_y0;
+        let clip_rect: [i32; 4] = [0, 0, box_w, box_h];
+        const ETO_CLIPPED: u32 = 0x0004;
+
+        unsafe {
             let font = self.get_font(style);
             SelectObject(self.hdc, font);
             SetBkMode(self.hdc, TRANSPARENT);
-            SetTextColor(self.hdc, 0x00FF_FFFF);
+            SetTextColor(self.hdc, colorref);
             let wide: Vec<u16> = text.encode_utf16().collect();
             ExtTextOutW(
                 self.hdc,
-                0,
-                0,
-                0,
-                null(),
+                draw_off_x,
+                draw_off_y,
+                ETO_CLIPPED,
+                clip_rect.as_ptr() as *const u8,
                 wide.as_ptr(),
                 wide.len() as u32,
                 null(),
@@ -260,29 +289,32 @@ impl FontScratch {
             GdiFlush();
         }
 
-        let src_slice =
-            unsafe { std::slice::from_raw_parts(self.bits, (self.dib_w as usize) * (self.dib_h as usize) * 4) };
-        let dst_w = canvas.width() as i32;
-        let dst_h = canvas.height() as i32;
-
-        for row in 0..clear_h as i32 {
-            let dy = y + row;
-            if dy < 0 || dy >= dst_h {
-                continue;
-            }
-            for col in 0..clear_w as i32 {
-                let dx = x + col;
-                if dx < 0 || dx >= dst_w {
-                    continue;
+        let src_slice = unsafe {
+            std::slice::from_raw_parts(self.bits, (self.dib_w as usize) * (self.dib_h as usize) * 4)
+        };
+        let alpha = color.a;
+        let dst_px = canvas.pixels_mut();
+        for row in 0..box_h as usize {
+            let cy = (clip_y0 as usize) + row;
+            let src_row_off = row * stride * 4;
+            let dst_row_off = (cy * canvas_stride + (clip_x0 as usize)) * 4;
+            let row_bytes = (box_w as usize) * 4;
+            if alpha == 255 {
+                dst_px[dst_row_off..dst_row_off + row_bytes]
+                    .copy_from_slice(&src_slice[src_row_off..src_row_off + row_bytes]);
+                for px in dst_px[dst_row_off..dst_row_off + row_bytes].chunks_exact_mut(4) {
+                    px[3] = 255;
                 }
-                let sidx = ((row as usize) * stride + (col as usize)) * 4;
-                // White text on black background -> channel intensity is coverage 0..255
-                let cov = src_slice[sidx].max(src_slice[sidx + 1]).max(src_slice[sidx + 2]);
-                if cov > 0 {
-                    let eff_a = ((cov as u16 * color.a as u16 + 127) / 255) as u8;
-                    if eff_a > 0 {
-                        canvas.set_pixel(dx, dy, Color::rgba(color.r, color.g, color.b, eff_a));
-                    }
+            } else {
+                let a = alpha as u16;
+                let inv = 255 - a;
+                for col in 0..box_w as usize {
+                    let si = src_row_off + col * 4;
+                    let di = dst_row_off + col * 4;
+                    dst_px[di] = ((src_slice[si] as u16 * a + dst_px[di] as u16 * inv + 127) / 255) as u8;
+                    dst_px[di + 1] = ((src_slice[si + 1] as u16 * a + dst_px[di + 1] as u16 * inv + 127) / 255) as u8;
+                    dst_px[di + 2] = ((src_slice[si + 2] as u16 * a + dst_px[di + 2] as u16 * inv + 127) / 255) as u8;
+                    dst_px[di + 3] = 255;
                 }
             }
         }

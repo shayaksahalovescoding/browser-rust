@@ -40,6 +40,10 @@ pub enum RendererEventKind {
         dom_dump: String,
         console_logs: String,
     },
+    CursorChanged {
+        cursor: u8,
+        hover_url: Option<String>,
+    },
     Crashed,
 }
 
@@ -210,6 +214,9 @@ impl ProcessManager {
                                 dom_dump,
                                 console_logs,
                             },
+                            RendererToBrowser::CursorChanged { cursor, hover_url } => {
+                                RendererEventKind::CursorChanged { cursor, hover_url }
+                            }
                         };
                         let _ = tx.send(RendererEvent { tab_id, kind });
                         wakeup();

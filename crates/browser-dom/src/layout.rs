@@ -49,6 +49,7 @@ pub struct LayoutBox {
     pub img_src: Option<String>,
     pub img_label: Option<String>,
     pub control: Option<ControlKind>,
+    pub href: Option<String>,
 }
 
 pub struct LayoutEngine;
@@ -60,10 +61,46 @@ impl LayoutEngine {
         viewport_w: i32,
         viewport_h: i32,
     ) -> (LayoutBox, Vec<HitTarget>, i32) {
+        let root_box = layout_node(doc, styles, 0, 0, 0, viewport_w.max(100), None);
         let mut hits = Vec::new();
-        let root_box = layout_node(doc, styles, 0, 0, 0, viewport_w.max(100), None, &mut hits);
+        collect_hits(&root_box, &mut hits);
         let content_h = root_box.rect.h.max(viewport_h);
         (root_box, hits, content_h)
+    }
+}
+
+/// Collects hit targets strictly after all flex, table, inline-block, and alignment shifts
+/// have settled so clickable rects always match painted pixels 1:1.
+fn collect_hits(b: &LayoutBox, hits: &mut Vec<HitTarget>) {
+    if b.style.display == Display::None {
+        return;
+    }
+    if b.control.is_some() {
+        hits.push(HitTarget {
+            rect: b.rect,
+            node_id: b.node_id,
+            href: b.href.clone(),
+        });
+    } else if let Some(href) = &b.href {
+        if b.img_src.is_some() || !b.children.is_empty() || b.text_runs.is_empty() {
+            hits.push(HitTarget {
+                rect: b.rect,
+                node_id: b.node_id,
+                href: Some(href.clone()),
+            });
+        }
+    }
+    for run in &b.text_runs {
+        if let Some(href) = &run.href {
+            hits.push(HitTarget {
+                rect: Rect::new(run.x, run.y, run.w, run.h),
+                node_id: run.node_id,
+                href: Some(href.clone()),
+            });
+        }
+    }
+    for ch in &b.children {
+        collect_hits(ch, hits);
     }
 }
 
@@ -84,6 +121,23 @@ fn resolve_width(dim: Dimension, max_dim: Dimension, avail_w: i32) -> Option<i32
     w
 }
 
+fn parse_svg_viewbox_dims(doc: &Document, id: NodeId) -> Option<(i32, i32)> {
+    let vb = doc.get_attribute(id, "viewbox")?;
+    let nums: Vec<f32> = vb
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<f32>().ok())
+        .collect();
+    if nums.len() == 4 && nums[2] > 0.0 && nums[3] > 0.0 {
+        Some((
+            nums[2].round().clamp(16.0, 400.0) as i32,
+            nums[3].round().clamp(16.0, 200.0) as i32,
+        ))
+    } else {
+        None
+    }
+}
+
 fn make_img_box(
     doc: &Document,
     st: ComputedStyle,
@@ -92,26 +146,43 @@ fn make_img_box(
     box_y: i32,
     avail_w: i32,
     active_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
 ) -> LayoutBox {
+    let tag = doc.tag_name(id);
+    if tag == Some("svg") {
+        let (vb_w, vb_h) = parse_svg_viewbox_dims(doc, id).unwrap_or((24, 24));
+        let w = resolve_width(st.width, st.max_width, avail_w).unwrap_or(vb_w);
+        let h = match st.height {
+            Dimension::Px(px) => px.round() as i32,
+            _ => vb_h,
+        };
+        let label = doc.get_attribute(id, "aria-label").map(str::to_string);
+        return LayoutBox {
+            node_id: id,
+            rect: Rect::new(box_x, box_y, w.max(1), h.max(1)),
+            style: st,
+            text_runs: Vec::new(),
+            children: Vec::new(),
+            img_src: Some(format!("__svg_{id}")),
+            img_label: label,
+            control: None,
+            href: active_href.map(str::to_string),
+        };
+    }
+
     let alt = doc
         .get_attribute(id, "alt")
         .filter(|s| !s.is_empty())
         .unwrap_or("image");
-    let src = doc.get_attribute(id, "src").map(str::to_string);
+    let src = doc
+        .get_attribute(id, "src")
+        .or_else(|| doc.get_attribute(id, "data-src"))
+        .map(str::to_string);
     let w = resolve_width(st.width, st.max_width, avail_w).unwrap_or(180);
     let h = match st.height {
         Dimension::Px(px) => px.round() as i32,
         _ => 48,
     };
     let rect = Rect::new(box_x, box_y, w.max(1), h.max(1));
-    if active_href.is_some() {
-        hits.push(HitTarget {
-            rect,
-            node_id: id,
-            href: active_href.map(str::to_string),
-        });
-    }
     LayoutBox {
         node_id: id,
         rect,
@@ -121,6 +192,7 @@ fn make_img_box(
         img_src: src,
         img_label: Some(alt.to_string()),
         control: None,
+        href: active_href.map(str::to_string),
     }
 }
 
@@ -130,19 +202,18 @@ fn layout_inline_block_element(
     id: NodeId,
     avail_w: i32,
     active_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
 ) -> LayoutBox {
     let st = styles[id].clone();
     let tag = doc.tag_name(id);
     let own_href = if tag == Some("a") {
-        doc.get_attribute(id, "href")
+        doc.get_attribute(id, "href").map(str::trim)
     } else {
         None
     };
     let effective_href = own_href.or(active_href);
 
-    if tag == Some("img") {
-        return make_img_box(doc, st, id, 0, 0, avail_w, effective_href, hits);
+    if matches!(tag, Some("img") | Some("svg")) {
+        return make_img_box(doc, st, id, 0, 0, avail_w, effective_href);
     }
 
     let pad_t = st.padding[0].round() as i32;
@@ -151,6 +222,40 @@ fn layout_inline_block_element(
     let pad_l = st.padding[3].round() as i32;
     let bw = st.border_width.round() as i32;
     let font = st.font_style();
+
+    if tag == Some("textarea") {
+        let name = doc.get_attribute(id, "name").unwrap_or("").to_string();
+        let value = doc.text_content(id);
+        let placeholder = doc
+            .get_attribute(id, "placeholder")
+            .or_else(|| doc.get_attribute(id, "aria-label"))
+            .or_else(|| doc.get_attribute(id, "title"))
+            .unwrap_or("Search")
+            .to_string();
+        let w = resolve_width(st.width, st.max_width, avail_w)
+            .unwrap_or(420)
+            .min(avail_w.max(80));
+        let (_, lh) = measure_text_styled(font, "Ay");
+        let h = match st.height {
+            Dimension::Px(px) => px.round() as i32,
+            _ => (lh + pad_t + pad_b + 2 * bw).max(40),
+        };
+        return LayoutBox {
+            node_id: id,
+            rect: Rect::new(0, 0, w, h),
+            style: st,
+            text_runs: Vec::new(),
+            children: Vec::new(),
+            img_src: None,
+            img_label: None,
+            control: Some(ControlKind::TextInput {
+                name,
+                value,
+                placeholder,
+            }),
+            href: None,
+        };
+    }
 
     if tag == Some("input") {
         let ty = doc
@@ -161,6 +266,7 @@ fn layout_inline_block_element(
         let value = doc.get_attribute(id, "value").unwrap_or("").to_string();
         let placeholder = doc
             .get_attribute(id, "placeholder")
+            .or_else(|| doc.get_attribute(id, "aria-label"))
             .or_else(|| doc.get_attribute(id, "title"))
             .unwrap_or("")
             .to_string();
@@ -192,11 +298,6 @@ fn layout_inline_block_element(
                 node_id: id,
                 href: effective_href.map(str::to_string),
             };
-            hits.push(HitTarget {
-                rect,
-                node_id: id,
-                href: effective_href.map(str::to_string),
-            });
             return LayoutBox {
                 node_id: id,
                 rect,
@@ -206,6 +307,7 @@ fn layout_inline_block_element(
                 img_src: None,
                 img_label: None,
                 control: Some(ControlKind::SubmitButton { name, label }),
+                href: effective_href.map(str::to_string),
             };
         }
 
@@ -215,17 +317,11 @@ fn layout_inline_block_element(
         let (_, lh) = measure_text_styled(font, "Ay");
         let h = match st.height {
             Dimension::Px(px) => px.round() as i32,
-            _ => (lh + pad_t + pad_b + 2 * bw).max(34),
+            _ => (lh + pad_t + pad_b + 2 * bw).max(36),
         };
-        let rect = Rect::new(0, 0, w, h);
-        hits.push(HitTarget {
-            rect,
-            node_id: id,
-            href: None,
-        });
         return LayoutBox {
             node_id: id,
-            rect,
+            rect: Rect::new(0, 0, w, h),
             style: st,
             text_runs: Vec::new(),
             children: Vec::new(),
@@ -236,6 +332,7 @@ fn layout_inline_block_element(
                 value,
                 placeholder,
             }),
+            href: None,
         };
     }
 
@@ -243,7 +340,9 @@ fn layout_inline_block_element(
         let label_raw = doc.text_content(id);
         let label: String = label_raw.split_whitespace().collect::<Vec<_>>().join(" ");
         let label = if label.is_empty() {
-            "Button".to_string()
+            doc.get_attribute(id, "aria-label")
+                .unwrap_or("Button")
+                .to_string()
         } else {
             label
         };
@@ -269,11 +368,6 @@ fn layout_inline_block_element(
             node_id: id,
             href: effective_href.map(str::to_string),
         };
-        hits.push(HitTarget {
-            rect,
-            node_id: id,
-            href: effective_href.map(str::to_string),
-        });
         return LayoutBox {
             node_id: id,
             rect,
@@ -283,11 +377,11 @@ fn layout_inline_block_element(
             img_src: None,
             img_label: None,
             control: Some(ControlKind::SubmitButton { name, label }),
+            href: effective_href.map(str::to_string),
         };
     }
 
-    // Generic CSS inline-block container: layout then shrink-wrap if width is auto
-    let mut b = layout_node(doc, styles, id, 0, 0, avail_w, effective_href, hits);
+    let mut b = layout_node(doc, styles, id, 0, 0, avail_w, effective_href);
     if matches!(st.width, Dimension::Auto) {
         let mut max_r = 0i32;
         for r in &b.text_runs {
@@ -311,12 +405,11 @@ fn layout_node(
     origin_y: i32,
     avail_w: i32,
     inherited_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
 ) -> LayoutBox {
     let st = styles[id].clone();
     let tag = doc.tag_name(id);
     let own_href = if tag == Some("a") {
-        doc.get_attribute(id, "href")
+        doc.get_attribute(id, "href").map(str::trim)
     } else {
         None
     };
@@ -344,8 +437,16 @@ fn layout_node(
     };
     let box_y = origin_y + m_top;
 
-    if tag == Some("img") {
-        return make_img_box(doc, st, id, box_x, box_y, avail_w, active_href, hits);
+    if matches!(tag, Some("img") | Some("svg")) {
+        return make_img_box(doc, st, id, box_x, box_y, avail_w, active_href);
+    }
+
+    if matches!(tag, Some("textarea") | Some("input") | Some("button")) {
+        let mut b = layout_inline_block_element(doc, styles, id, avail_w, active_href);
+        let dx = box_x - b.rect.x;
+        let dy = box_y - b.rect.y;
+        shift_layout_box(&mut b, dx, dy);
+        return b;
     }
 
     let content_x = box_x + bw + pad_l;
@@ -366,7 +467,6 @@ fn layout_node(
             content_y,
             content_w,
             active_href,
-            hits,
             &mut children_boxes,
             &mut cur_y,
         );
@@ -379,7 +479,6 @@ fn layout_node(
             &mut cur_y,
             content_w,
             active_href,
-            hits,
             &mut children_boxes,
         );
     } else {
@@ -390,7 +489,7 @@ fn layout_node(
             if ch_st.display == Display::None {
                 continue;
             }
-            if is_block_like(doc, ch, ch_st) {
+            if is_block_like(doc, styles, ch) {
                 flush_inline_tokens(
                     &mut inline_tokens,
                     content_x,
@@ -399,23 +498,13 @@ fn layout_node(
                     st.text_align,
                     &mut text_runs,
                     &mut children_boxes,
-                    hits,
                 );
-                let cbox = layout_node(
-                    doc,
-                    styles,
-                    ch,
-                    content_x,
-                    cur_y,
-                    content_w,
-                    active_href,
-                    hits,
-                );
+                let cbox = layout_node(doc, styles, ch, content_x, cur_y, content_w, active_href);
                 let cm_bottom = ch_st.margin[2].round() as i32;
                 cur_y = cbox.rect.y + cbox.rect.h + cm_bottom;
                 children_boxes.push(cbox);
             } else {
-                collect_inline_tokens(doc, styles, ch, content_w, active_href, hits, &mut inline_tokens);
+                collect_inline_tokens(doc, styles, ch, content_w, active_href, &mut inline_tokens);
             }
         }
         flush_inline_tokens(
@@ -426,7 +515,6 @@ fn layout_node(
             st.text_align,
             &mut text_runs,
             &mut children_boxes,
-            hits,
         );
     }
 
@@ -437,13 +525,6 @@ fn layout_node(
     }
 
     let rect = Rect::new(box_x, box_y, box_w, box_h);
-    if active_href.is_some() && !children_boxes.is_empty() && text_runs.is_empty() {
-        hits.push(HitTarget {
-            rect,
-            node_id: id,
-            href: active_href.map(str::to_string),
-        });
-    }
     let _ = m_bottom;
 
     LayoutBox {
@@ -455,6 +536,7 @@ fn layout_node(
         img_src: None,
         img_label: None,
         control: None,
+        href: active_href.map(str::to_string),
     }
 }
 
@@ -467,7 +549,6 @@ fn layout_table_rows(
     cur_y: &mut i32,
     content_w: i32,
     active_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
     out: &mut Vec<LayoutBox>,
 ) {
     let mut row_ids = Vec::new();
@@ -520,7 +601,7 @@ fn layout_table_rows(
         let mut row_boxes = Vec::with_capacity(cells.len());
         for (i, &cid) in cells.iter().enumerate() {
             let cw = cell_widths[i].unwrap_or(auto_w);
-            let mut cbox = layout_node(doc, styles, cid, cell_x, *cur_y, cw, active_href, hits);
+            let mut cbox = layout_node(doc, styles, cid, cell_x, *cur_y, cw, active_href);
             cbox.rect.w = cw;
             row_h = row_h.max(cbox.rect.h);
             cell_x += cw;
@@ -544,7 +625,6 @@ fn layout_flex_children(
     content_y: i32,
     content_w: i32,
     active_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
     out: &mut Vec<LayoutBox>,
     cur_y: &mut i32,
 ) {
@@ -565,16 +645,7 @@ fn layout_flex_children(
 
     if st.flex_direction == FlexDirection::Column {
         for (i, ch) in visible_children.iter().enumerate() {
-            let cbox = layout_node(
-                doc,
-                styles,
-                *ch,
-                content_x,
-                *cur_y,
-                content_w,
-                active_href,
-                hits,
-            );
+            let cbox = layout_node(doc, styles, *ch, content_x, *cur_y, content_w, active_href);
             *cur_y = cbox.rect.y + cbox.rect.h + styles[*ch].margin[2].round() as i32;
             if i + 1 < visible_children.len() {
                 *cur_y += gap;
@@ -596,17 +667,35 @@ fn layout_flex_children(
         let ch_st = &styles[ch];
         let explicit_w = resolve_width(ch_st.width, ch_st.max_width, content_w);
         let child_avail = explicit_w.unwrap_or(slot_w);
-        let cbox = layout_node(
-            doc,
-            styles,
-            ch,
-            0,
-            content_y,
-            child_avail,
-            active_href,
-            hits,
-        );
-        total_used_w += cbox.rect.w;
+        let cbox = if explicit_w.is_none()
+            && !matches!(ch_st.display, Display::Block | Display::Flex | Display::Table)
+        {
+            let mut b = layout_inline_block_element(doc, styles, ch, content_w, active_href);
+            let dy = content_y - b.rect.y;
+            shift_layout_box(&mut b, 0, dy);
+            b
+        } else {
+            let mut b = layout_node(doc, styles, ch, 0, content_y, child_avail, active_href);
+            if explicit_w.is_none() && b.style.margin_auto_x == (false, false) {
+                let mut max_r = b.rect.x;
+                for r in &b.text_runs {
+                    max_r = max_r.max(r.x + r.w);
+                }
+                for gc in &b.children {
+                    max_r = max_r.max(gc.rect.x + gc.rect.w);
+                }
+                let pad_r = ch_st.padding[1].round() as i32;
+                let bw = ch_st.border_width.round() as i32;
+                let fit_w = (max_r - b.rect.x + pad_r + bw).max(8);
+                if fit_w < b.rect.w {
+                    b.rect.w = fit_w;
+                }
+            }
+            b
+        };
+        let m_left = ch_st.margin[3].round() as i32;
+        let m_right = ch_st.margin[1].round() as i32;
+        total_used_w += cbox.rect.w + m_left + m_right;
         max_h = max_h.max(cbox.rect.h);
         temp_boxes.push(cbox);
     }
@@ -623,48 +712,69 @@ fn layout_flex_children(
     };
 
     for mut cbox in temp_boxes {
-        let dx = x - cbox.rect.x;
+        let m_left = cbox.style.margin[3].round() as i32;
+        let m_right = cbox.style.margin[1].round() as i32;
+        let dx = (x + m_left) - cbox.rect.x;
         let dy = match st.align_items {
             AlignItems::Center => (max_h - cbox.rect.h) / 2,
             AlignItems::Start | AlignItems::Stretch => 0,
         };
-        shift_layout_box(&mut cbox, dx, dy, hits);
-        x += cbox.rect.w + gap + extra_gap;
+        shift_layout_box(&mut cbox, dx, dy);
+        x += m_left + cbox.rect.w + m_right + gap + extra_gap;
         out.push(cbox);
     }
     *cur_y = content_y + max_h;
 }
 
-fn shift_layout_box(b: &mut LayoutBox, dx: i32, dy: i32, hits: &mut [HitTarget]) {
+fn shift_layout_box(b: &mut LayoutBox, dx: i32, dy: i32) {
     if dx == 0 && dy == 0 {
         return;
     }
-    let old_rect = b.rect;
     b.rect.x += dx;
     b.rect.y += dy;
     for r in &mut b.text_runs {
         r.x += dx;
         r.y += dy;
     }
-    for h in hits.iter_mut() {
-        if h.node_id == b.node_id && h.rect == old_rect {
-            h.rect.x += dx;
-            h.rect.y += dy;
-        }
-    }
     for ch in &mut b.children {
-        shift_layout_box(ch, dx, dy, hits);
+        shift_layout_box(ch, dx, dy);
     }
 }
 
-fn is_block_like(doc: &Document, id: NodeId, st: &ComputedStyle) -> bool {
+fn contains_block_child(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
+    for &ch in &doc.nodes[id].children {
+        let st = &styles[ch];
+        if st.display == Display::None {
+            continue;
+        }
+        if matches!(
+            st.display,
+            Display::Block | Display::Flex | Display::Table | Display::TableRow | Display::TableCell
+        ) {
+            return true;
+        }
+        if contains_block_child(doc, styles, ch) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_block_like(doc: &Document, styles: &[ComputedStyle], id: NodeId) -> bool {
     if matches!(&doc.nodes[id].data, NodeData::Text(_)) {
         return false;
     }
-    matches!(
+    let st = &styles[id];
+    if matches!(
         st.display,
         Display::Block | Display::Flex | Display::Table | Display::TableRow | Display::TableCell
-    )
+    ) {
+        return true;
+    }
+    // Inline wrappers like `<a href="..."><div>Card</div></a>` should behave as block flow.
+    st.display == Display::Inline
+        && doc.tag_name(id) == Some("a")
+        && contains_block_child(doc, styles, id)
 }
 
 enum InlineToken {
@@ -686,7 +796,6 @@ fn collect_inline_tokens(
     id: NodeId,
     avail_w: i32,
     inherited_href: Option<&str>,
-    hits: &mut Vec<HitTarget>,
     out: &mut Vec<InlineToken>,
 ) {
     let st = &styles[id];
@@ -715,18 +824,18 @@ fn collect_inline_tokens(
                 return;
             }
             let own_href = if tag == "a" {
-                doc.get_attribute(id, "href")
+                doc.get_attribute(id, "href").map(str::trim)
             } else {
                 None
             };
             let next_href = own_href.or(inherited_href);
             if st.display == Display::InlineBlock {
-                let ibox = layout_inline_block_element(doc, styles, id, avail_w, next_href, hits);
+                let ibox = layout_inline_block_element(doc, styles, id, avail_w, next_href);
                 out.push(InlineToken::InlineBox(Box::new(ibox)));
                 return;
             }
             for &ch in &doc.nodes[id].children {
-                collect_inline_tokens(doc, styles, ch, avail_w, next_href, hits, out);
+                collect_inline_tokens(doc, styles, ch, avail_w, next_href, out);
             }
         }
         NodeData::Document => {}
@@ -747,7 +856,6 @@ fn flush_inline_tokens(
     align: TextAlign,
     out_runs: &mut Vec<TextRun>,
     out_boxes: &mut Vec<LayoutBox>,
-    hits: &mut Vec<HitTarget>,
 ) {
     if tokens.is_empty() {
         return;
@@ -836,7 +944,7 @@ fn flush_inline_tokens(
                 };
                 let dx = x_off - ibox.rect.x;
                 let dy = gap_t - ibox.rect.y;
-                shift_layout_box(&mut ibox, dx, dy, hits);
+                shift_layout_box(&mut ibox, dx, dy);
                 line_items.push(LineItem::Box(ibox));
                 line_w = x_off + bw + gap_r;
                 line_h = line_h.max(bh + 2);
@@ -858,18 +966,11 @@ fn flush_inline_tokens(
                 LineItem::Run(mut r) => {
                     r.x += start_x;
                     r.y = *cur_y + ((lh - r.h) / 2).max(0);
-                    if r.href.is_some() {
-                        hits.push(HitTarget {
-                            rect: Rect::new(r.x, r.y, r.w, r.h),
-                            node_id: r.node_id,
-                            href: r.href.clone(),
-                        });
-                    }
                     out_runs.push(r);
                 }
                 LineItem::Box(mut b) => {
                     let v_off = ((lh - b.rect.h) / 2).max(0);
-                    shift_layout_box(&mut b, start_x, *cur_y + v_off, hits);
+                    shift_layout_box(&mut b, start_x, *cur_y + v_off);
                     out_boxes.push(*b);
                 }
             }

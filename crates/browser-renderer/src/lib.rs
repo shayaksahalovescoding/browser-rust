@@ -9,9 +9,12 @@ use std::rc::Rc;
 
 use browser_dom::{
     Document, HitTarget, LayoutBox, LayoutEngine, NodeData, NodeId, Stylesheet, compute_styles,
-    paint_layout_with_assets, parse_html,
+    css::parse_color, paint_layout_with_assets, parse_html,
 };
-use browser_gfx::{CanvasView, DecodedImage, Rect, decode_image};
+use browser_gfx::{
+    CanvasView, Color, DecodedImage, Rect, SvgElement, decode_data_uri, decode_image,
+    rasterize_svg,
+};
 use browser_ipc::{BrowserToRenderer, MouseButton, RendererToBrowser, SharedFrameBuffer};
 use browser_js::JsEngine;
 use browser_net::{HttpClient, Url};
@@ -122,6 +125,31 @@ impl LoadedDocument {
     }
 }
 
+fn is_editable_control(doc: &Document, id: NodeId) -> bool {
+    match doc.tag_name(id) {
+        Some("textarea") => true,
+        Some("input") => !matches!(
+            doc.get_attribute(id, "type")
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
+            Some("submit" | "button" | "reset" | "hidden")
+        ),
+        _ => false,
+    }
+}
+
+fn find_box_y(b: &LayoutBox, node_id: NodeId) -> Option<i32> {
+    if b.node_id == node_id {
+        return Some(b.rect.y);
+    }
+    for ch in &b.children {
+        if let Some(y) = find_box_y(ch, node_id) {
+            return Some(y);
+        }
+    }
+    None
+}
+
 pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -133,6 +161,7 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
     let mut current_url = String::from("chrome://newtab");
     let mut current_nav_id = 0u64;
     let mut hover_pos: Option<(i32, i32)> = None;
+    let mut last_cursor: (u8, Option<String>) = (0, None);
     let mut builtin_links: Vec<(Rect, String)> = Vec::new();
     let mut active_doc: Option<LoadedDocument> = None;
 
@@ -149,6 +178,8 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                 }
                 current_url = url.clone();
                 current_nav_id = nav_id;
+                let need_cursor_reset = last_cursor != (0, None);
+                last_cursor = (0, None);
 
                 if pages::is_builtin_canvas_route(&url) {
                     active_doc = None;
@@ -194,6 +225,13 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                         }
                     }
                 }
+                if need_cursor_reset {
+                    let _ = RendererToBrowser::CursorChanged {
+                        cursor: 0,
+                        hover_url: None,
+                    }
+                    .write_to(&mut writer);
+                }
             }
             BrowserToRenderer::Resize {
                 width,
@@ -229,11 +267,54 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                 }
             }
             BrowserToRenderer::MouseMove { x, y } => {
-                if active_doc.is_none() {
+                if let Some(doc) = active_doc.as_ref() {
+                    let doc_y = y + doc.scroll_y;
+                    let hit = doc.hits.iter().rev().find(|h| h.rect.contains(x, doc_y));
+                    let next_cursor = if let Some(h) = hit {
+                        let d = doc.doc.borrow();
+                        if is_editable_control(&d, h.node_id) {
+                            (2u8, None)
+                        } else if let Some(href) = &h.href {
+                            let resolved = if href.starts_with('#') {
+                                format!("{current_url}{href}")
+                            } else if let Some(base) = &doc.base_url {
+                                base.resolve(href).map(|u| u.as_str()).unwrap_or_else(|_| href.clone())
+                            } else {
+                                href.clone()
+                            };
+                            (1u8, Some(resolved))
+                        } else {
+                            (1u8, None)
+                        }
+                    } else {
+                        (0u8, None)
+                    };
+                    if next_cursor != last_cursor {
+                        last_cursor = next_cursor.clone();
+                        RendererToBrowser::CursorChanged {
+                            cursor: next_cursor.0,
+                            hover_url: next_cursor.1,
+                        }
+                        .write_to(&mut writer)?;
+                    }
+                } else {
                     let prev_hover = hover_pos.and_then(|(px, py)| find_hit(&builtin_links, px, py));
-                    let next_hover = find_hit(&builtin_links, x, y);
+                    let next_hover = find_hit(&builtin_links, x, y).map(str::to_string);
                     hover_pos = Some((x, y));
-                    if prev_hover != next_hover {
+                    let next_cursor = if let Some(url) = &next_hover {
+                        (1u8, Some(url.clone()))
+                    } else {
+                        (0u8, None)
+                    };
+                    if next_cursor != last_cursor {
+                        last_cursor = next_cursor.clone();
+                        RendererToBrowser::CursorChanged {
+                            cursor: next_cursor.0,
+                            hover_url: next_cursor.1,
+                        }
+                        .write_to(&mut writer)?;
+                    }
+                    if prev_hover != next_hover.as_deref() {
                         let title = render_builtin_and_commit(
                             &mut shm,
                             cfg.tab_id,
@@ -260,16 +341,7 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                         .cloned();
                     if let Some(hit) = hit {
                         let prev_focus = doc.focused_input;
-                        let is_text_input = {
-                            let d = doc.doc.borrow();
-                            d.tag_name(hit.node_id) == Some("input")
-                                && !matches!(
-                                    d.get_attribute(hit.node_id, "type")
-                                        .map(|s| s.to_ascii_lowercase())
-                                        .as_deref(),
-                                    Some("submit" | "button" | "reset" | "hidden")
-                                )
-                        };
+                        let is_text_input = is_editable_control(&doc.doc.borrow(), hit.node_id);
                         if is_text_input {
                             doc.focused_input = Some(hit.node_id);
                         } else {
@@ -292,14 +364,40 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                             doc.devtools_message(current_nav_id).write_to(&mut writer)?;
                         }
 
-                        if let Some(href) = hit.href {
-                            let resolved = if let Some(base) = &doc.base_url {
-                                base.resolve(&href).map(|u| u.as_str()).unwrap_or(href)
-                            } else {
-                                href
-                            };
-                            RendererToBrowser::RequestNavigate { url: resolved }
-                                .write_to(&mut writer)?;
+                        if let Some(raw_href) = hit.href {
+                            let href = raw_href.trim();
+                            if href.starts_with('#') {
+                                let target_id = &href[1..];
+                                let scroll_to = if target_id.is_empty() {
+                                    Some(0)
+                                } else {
+                                    doc.doc
+                                        .borrow()
+                                        .get_element_by_id(target_id)
+                                        .and_then(|nid| find_box_y(&doc.layout, nid))
+                                };
+                                if let Some(ty) = scroll_to {
+                                    let vh = shm.height() as i32;
+                                    let max_scroll = (doc.content_height - vh).max(0);
+                                    doc.scroll_y = ty.clamp(0, max_scroll);
+                                    doc.paint_into(&mut shm);
+                                    commit_frame(&mut writer, current_nav_id, &shm, &doc.title)?;
+                                }
+                            } else if !href.is_empty()
+                                && !href.to_ascii_lowercase().starts_with("javascript:")
+                                && !href.to_ascii_lowercase().starts_with("mailto:")
+                                && !href.to_ascii_lowercase().starts_with("tel:")
+                            {
+                                let resolved = if let Some(base) = &doc.base_url {
+                                    base.resolve(href)
+                                        .map(|u| u.as_str())
+                                        .unwrap_or_else(|_| href.to_string())
+                                } else {
+                                    href.to_string()
+                                };
+                                RendererToBrowser::RequestNavigate { url: resolved }
+                                    .write_to(&mut writer)?;
+                            }
                         } else {
                             let is_submit = {
                                 let d = doc.doc.borrow();
@@ -361,7 +459,14 @@ pub fn run_renderer_main(cfg: RendererConfig) -> io::Result<()> {
                                 val.push(ch);
                             }
                             let updated = val.clone();
-                            doc.doc.borrow_mut().set_attribute(input_id, "value", &updated);
+                            {
+                                let mut d = doc.doc.borrow_mut();
+                                if d.tag_name(input_id) == Some("textarea") {
+                                    d.set_text_content(input_id, &updated);
+                                } else {
+                                    d.set_attribute(input_id, "value", &updated);
+                                }
+                            }
                             doc.paint_into(&mut shm);
                             commit_frame(&mut writer, current_nav_id, &shm, &doc.title)?;
                         }
@@ -382,15 +487,37 @@ pub fn load_document(
     vw: i32,
     vh: i32,
 ) -> Result<LoadedDocument, String> {
-    let (html_src, base_url, net_summary) = if url.eq_ignore_ascii_case("chrome://demo") {
-        (
-            pages::DEMO_HTML.to_string(),
-            None,
-            "chrome://demo (built-in HTML5/CSS3/JS engine showcase)".to_string(),
-        )
-    } else {
-        let resp = http.get(url).map_err(|e| e.to_string())?;
+    let mut current_url = url.to_string();
+    let mut hops = 0;
+
+    let (html_src, mut base_url, net_summary) = loop {
+        if current_url.eq_ignore_ascii_case("chrome://demo") {
+            break (
+                pages::DEMO_HTML.to_string(),
+                None,
+                "chrome://demo (built-in HTML5/CSS3/JS engine showcase)".to_string(),
+            );
+        }
+        let resp = http.get(&current_url).map_err(|e| e.to_string())?;
         let base = Url::parse(&resp.final_url).ok();
+        let text = resp.body_text();
+
+        // Honor <meta http-equiv="refresh" content="0;url=..."> once when delay <= 3s
+        if hops < 2 {
+            let quick = parse_html(&text);
+            if let Some(refresh_target) = find_meta_refresh_url(&quick) {
+                if let Some(ref b) = base {
+                    if let Ok(next_u) = b.resolve(&refresh_target) {
+                        if next_u.as_str() != resp.final_url {
+                            current_url = next_u.as_str();
+                            hops += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         let summary = format!(
             "HTTP {} {} | {} bytes | cache={} | {}",
             resp.status,
@@ -399,11 +526,17 @@ pub fn load_document(
             resp.from_cache,
             resp.final_url
         );
-        (resp.body_text(), base, summary)
+        break (text, base, summary);
     };
 
     let mut parsed = parse_html(&html_src);
-    let title = parsed.title().unwrap_or_else(|| url.to_string());
+    if let (Some(base_href), Some(cur_b)) = (find_base_href(&parsed), &base_url) {
+        if let Ok(resolved) = cur_b.resolve(&base_href) {
+            base_url = Some(resolved);
+        }
+    }
+
+    let title = parsed.title().unwrap_or_else(|| current_url.clone());
     let link_hrefs = parsed.collect_stylesheet_links();
     let scripts = parsed.collect_scripts();
 
@@ -420,32 +553,38 @@ pub fn load_document(
         }
     }
 
-    // Fetch & decode visible <img src="..."> assets
+    // Fetch / decode visible <img src|data-src> (including inline data:image/...) & inline <svg>
     let mut images = HashMap::new();
     let mut unsized_imgs = Vec::new();
-    if let Some(base) = &base_url {
-        let img_nodes = collect_visible_images(&parsed);
-        let mut seen = HashSet::new();
-        for (nid, src) in img_nodes {
-            if !seen.insert(src.clone()) || seen.len() > 24 {
+    let img_nodes = collect_visible_images(&parsed);
+    let mut seen = HashSet::new();
+    let mut net_fetch_count = 0usize;
+    for (nid, src) in img_nodes {
+        if !seen.insert(src.clone()) {
+            continue;
+        }
+        let decoded = if src.trim_start().to_ascii_lowercase().starts_with("data:image/") {
+            decode_data_uri(&src)
+        } else if let Some(base) = &base_url {
+            if net_fetch_count >= 24 {
                 continue;
             }
-            let fetched = if let Ok(img_url) = base.resolve(&src) {
-                http.get(&img_url.as_str())
-                    .ok()
-                    .filter(|r| r.status < 400)
-                    .and_then(|r| decode_image(&r.body))
-            } else {
-                None
-            };
-            if let Some(decoded) = fetched {
-                if parsed.get_attribute(nid, "width").is_none()
-                    && parsed.get_attribute(nid, "height").is_none()
-                {
-                    unsized_imgs.push((nid, decoded.width, decoded.height));
-                }
-                images.insert(src, decoded);
+            net_fetch_count += 1;
+            base.resolve(&src)
+                .ok()
+                .and_then(|img_url| http.get(&img_url.as_str()).ok())
+                .filter(|r| r.status < 400)
+                .and_then(|r| decode_image(&r.body))
+        } else {
+            None
+        };
+        if let Some(dimg) = decoded {
+            if parsed.get_attribute(nid, "width").is_none()
+                && parsed.get_attribute(nid, "height").is_none()
+            {
+                unsized_imgs.push((nid, dimg.width, dimg.height));
             }
+            images.insert(src, dimg);
         }
     }
     for (nid, iw, ih) in unsized_imgs {
@@ -456,7 +595,9 @@ pub fn load_document(
         parsed.set_attribute(nid, "height", &h.to_string());
     }
 
-    // Seed initial input field values
+    rasterize_inline_svgs(&parsed, &mut images);
+
+    // Seed initial input & textarea values
     let mut input_values = HashMap::new();
     for node in &parsed.nodes {
         if let NodeData::Element { tag, attrs } = &node.data {
@@ -471,6 +612,8 @@ pub fn load_document(
                         attrs.get("value").cloned().unwrap_or_default(),
                     );
                 }
+            } else if tag == "textarea" {
+                input_values.insert(node.id, parsed.text_content(node.id));
             }
         }
     }
@@ -504,6 +647,7 @@ pub fn load_document(
         img_src: None,
         img_label: None,
         control: None,
+        href: None,
     };
 
     let mut loaded = LoadedDocument {
@@ -525,6 +669,165 @@ pub fn load_document(
     Ok(loaded)
 }
 
+fn find_base_href(doc: &Document) -> Option<String> {
+    for node in &doc.nodes {
+        if let NodeData::Element { tag, attrs } = &node.data {
+            if tag == "base" {
+                if let Some(h) = attrs.get("href").filter(|s| !s.trim().is_empty()) {
+                    return Some(h.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_meta_refresh_url(doc: &Document) -> Option<String> {
+    for node in &doc.nodes {
+        if let NodeData::Element { tag, attrs } = &node.data {
+            if tag == "meta"
+                && attrs
+                    .get("http-equiv")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("refresh"))
+            {
+                if let Some(content) = attrs.get("content") {
+                    if let Some((delay_s, rest)) = content.split_once(';') {
+                        let delay = delay_s.trim().parse::<f32>().unwrap_or(99.0);
+                        if delay <= 3.0 {
+                            let rest_t = rest.trim();
+                            if let Some((_, url_part)) = rest_t.split_once('=') {
+                                let cleaned =
+                                    url_part.trim().trim_matches(|c| c == '"' || c == '\'');
+                                if !cleaned.is_empty() {
+                                    return Some(cleaned.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn rasterize_inline_svgs(doc: &Document, images: &mut HashMap<String, DecodedImage>) {
+    fn walk_svg(doc: &Document, id: NodeId, cur_fill: Color, out: &mut Vec<SvgElement>) {
+        if let NodeData::Element { tag, attrs } = &doc.nodes[id].data {
+            let own_fill = attrs
+                .get("fill")
+                .and_then(|v| {
+                    let vl = v.trim().to_ascii_lowercase();
+                    if vl == "none" {
+                        Some(Color::rgba(0, 0, 0, 0))
+                    } else if vl == "currentcolor" {
+                        Some(cur_fill)
+                    } else {
+                        parse_color(&vl)
+                    }
+                })
+                .unwrap_or(cur_fill);
+
+            match tag.as_str() {
+                "path" => {
+                    if let Some(d) = attrs.get("d") {
+                        out.push(SvgElement::Path {
+                            d: d.clone(),
+                            fill: own_fill,
+                        });
+                    }
+                }
+                "rect" => {
+                    let x = attrs.get("x").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let y = attrs.get("y").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let w = attrs.get("width").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let h = attrs.get("height").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    out.push(SvgElement::Rect {
+                        x,
+                        y,
+                        w,
+                        h,
+                        fill: own_fill,
+                    });
+                }
+                "circle" => {
+                    let cx = attrs.get("cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let cy = attrs.get("cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let r = attrs.get("r").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    out.push(SvgElement::Circle {
+                        cx,
+                        cy,
+                        r,
+                        fill: own_fill,
+                    });
+                }
+                _ => {}
+            }
+            for &ch in &doc.nodes[id].children {
+                walk_svg(doc, ch, own_fill, out);
+            }
+        }
+    }
+
+    fn scan(doc: &Document, id: NodeId, images: &mut HashMap<String, DecodedImage>) {
+        if let NodeData::Element { tag, attrs } = &doc.nodes[id].data {
+            if matches!(tag.as_str(), "head" | "script" | "style" | "noscript" | "template") {
+                return;
+            }
+            if tag == "svg" {
+                let w = attrs
+                    .get("width")
+                    .and_then(|s| s.trim_end_matches("px").trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                let h = attrs
+                    .get("height")
+                    .and_then(|s| s.trim_end_matches("px").trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                let vb = attrs.get("viewbox").and_then(|s| {
+                    let n: Vec<f32> = s
+                        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                        .filter(|x| !x.is_empty())
+                        .filter_map(|x| x.parse::<f32>().ok())
+                        .collect();
+                    if n.len() == 4 && n[2] > 0.0 && n[3] > 0.0 {
+                        Some((n[0], n[1], n[2], n[3]))
+                    } else {
+                        None
+                    }
+                });
+                let out_w = if w > 0 {
+                    w
+                } else {
+                    vb.map(|v| v.2.round() as u32).unwrap_or(24)
+                };
+                let out_h = if h > 0 {
+                    h
+                } else {
+                    vb.map(|v| v.3.round() as u32).unwrap_or(24)
+                };
+                let viewbox = vb.unwrap_or((0.0, 0.0, out_w as f32, out_h as f32));
+                let default_fill = Color::rgb(95, 99, 104);
+                let mut elements = Vec::new();
+                walk_svg(doc, id, default_fill, &mut elements);
+                if let Some(dimg) = rasterize_svg(
+                    viewbox,
+                    out_w.clamp(16, 512),
+                    out_h.clamp(16, 512),
+                    &elements,
+                ) {
+                    images.insert(format!("__svg_{id}"), dimg);
+                }
+                return;
+            }
+        }
+        for &ch in &doc.nodes[id].children {
+            scan(doc, ch, images);
+        }
+    }
+
+    scan(doc, 0, images);
+}
+
 fn collect_visible_images(doc: &Document) -> Vec<(NodeId, String)> {
     fn walk(doc: &Document, id: NodeId, out: &mut Vec<(NodeId, String)>) {
         if let NodeData::Element { tag, attrs } = &doc.nodes[id].data {
@@ -532,7 +835,11 @@ fn collect_visible_images(doc: &Document) -> Vec<(NodeId, String)> {
                 return;
             }
             if tag == "img" {
-                if let Some(src) = attrs.get("src").filter(|s| !s.is_empty()) {
+                if let Some(src) = attrs
+                    .get("src")
+                    .or_else(|| attrs.get("data-src"))
+                    .filter(|s| !s.is_empty())
+                {
                     out.push((id, src.clone()));
                 }
             }
@@ -573,7 +880,7 @@ fn build_form_submit_url(
     };
 
     fn collect_form_inputs(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
-        if doc.tag_name(id) == Some("input") {
+        if matches!(doc.tag_name(id), Some("input") | Some("textarea")) {
             out.push(id);
         }
         for &ch in &doc.nodes[id].children {

@@ -16,6 +16,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000F;
 const WM_ERASEBKGND: u32 = 0x0014;
+const WM_SETCURSOR: u32 = 0x0020;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
 const WM_MOUSEMOVE: u32 = 0x0200;
@@ -29,7 +30,13 @@ const CW_USEDEFAULT: i32 = -2147483648;
 const SW_SHOW: i32 = 5;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
+const HTCLIENT: isize = 1;
 const IDC_ARROW: usize = 32512;
+const IDC_IBEAM: usize = 32513;
+const IDC_HAND: usize = 32649;
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOZORDER: u32 = 0x0004;
 const GWLP_USERDATA: i32 = -21;
 const BI_RGB: u32 = 0;
 const DIB_RGB_COLORS: u32 = 0;
@@ -131,7 +138,19 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn SetProcessDPIAware() -> i32;
+    fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+    fn GetDpiForWindow(hwnd: isize) -> u32;
+    fn SetWindowPos(
+        h_wnd: isize,
+        h_wnd_insert_after: isize,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        u_flags: u32,
+    ) -> i32;
     fn LoadCursorW(h_instance: isize, lp_cursor_name: *const u16) -> isize;
+    fn SetCursor(h_cursor: isize) -> isize;
     fn RegisterClassExW(lpwcx: *const WndClassExW) -> u16;
     fn CreateWindowExW(
         dw_ex_style: u32,
@@ -195,6 +214,8 @@ struct AppState {
     omnibox: OmniboxState,
     compositor: OwnedCanvas,
     hover: Option<(i32, i32)>,
+    page_cursor: u8,
+    hover_url: Option<String>,
     devtools_open: bool,
 }
 
@@ -219,6 +240,10 @@ impl AppState {
         let (vw, vh) = self.viewport_dims();
         let nav_id = self.tabs.alloc_nav_id();
         let is_active = self.tabs.active_tab().is_some_and(|a| a.id == tab_id);
+        if is_active {
+            self.page_cursor = 0;
+            self.hover_url = None;
+        }
         if let Some(tab) = self.tabs.find_by_id_mut(tab_id) {
             tab.url = url.clone();
             if push_history {
@@ -277,6 +302,8 @@ impl AppState {
     fn select_tab_at(&mut self, idx: usize) {
         if self.tabs.select_tab(idx) {
             self.omnibox.focused = false;
+            self.page_cursor = 0;
+            self.hover_url = None;
             if let Some(active) = self.tabs.active_tab().cloned() {
                 sync_omnibox_with_tab(&mut self.omnibox, &active);
                 let (vw, vh) = self.viewport_dims();
@@ -378,6 +405,22 @@ impl AppState {
                         }
                     }
                 }
+                RendererEventKind::CursorChanged { cursor, hover_url } => {
+                    if self.tabs.active_tab().is_some_and(|t| t.id == ev.tab_id) {
+                        let cursor_changed = self.page_cursor != cursor;
+                        let url_changed = self.hover_url != hover_url;
+                        self.page_cursor = cursor;
+                        self.hover_url = hover_url;
+                        if cursor_changed {
+                            self.apply_cursor();
+                        }
+                        if !url_changed {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
                 RendererEventKind::Crashed => {
                     let exit_code = self
                         .procs
@@ -406,9 +449,49 @@ impl AppState {
         self.invalidate();
     }
 
+    fn current_cursor_id(&self) -> usize {
+        if let Some((hx, hy)) = self.hover {
+            let crashed = self
+                .tabs
+                .active_tab()
+                .is_some_and(|t| matches!(t.status, TabStatus::Crashed { .. }));
+            let layout = UiLayout::compute(
+                self.compositor.width as i32,
+                self.compositor.height as i32,
+                self.tabs.tabs().len(),
+                crashed,
+                self.devtools_open,
+            );
+            if layout.omnibox_rect.contains(hx, hy) {
+                return IDC_IBEAM;
+            }
+            if hy >= CHROME_TOP_H && hy < CHROME_TOP_H + layout.viewport_h {
+                return match self.page_cursor {
+                    1 => IDC_HAND,
+                    2 => IDC_IBEAM,
+                    _ => IDC_ARROW,
+                };
+            }
+        }
+        IDC_ARROW
+    }
+
+    fn apply_cursor(&self) {
+        let cid = self.current_cursor_id();
+        unsafe {
+            let hcur = LoadCursorW(0, cid as *const u16);
+            if hcur != 0 {
+                SetCursor(hcur);
+            }
+        }
+    }
+
     fn handle_mouse_move(&mut self, x: i32, y: i32) {
+        let prev_hover = self.hover;
         self.hover = Some((x, y));
-        if y >= CHROME_TOP_H {
+        let (_, vh) = self.viewport_dims();
+        let in_viewport = y >= CHROME_TOP_H && y < CHROME_TOP_H + vh as i32;
+        if in_viewport {
             if let Some(active) = self.tabs.active_tab() {
                 if !matches!(active.status, TabStatus::Crashed { .. }) {
                     if let Some(handle) = self.procs.get_mut(active.id) {
@@ -419,8 +502,16 @@ impl AppState {
                     }
                 }
             }
+            self.apply_cursor();
+            if prev_hover.is_some_and(|(_, py)| py < CHROME_TOP_H) {
+                self.invalidate();
+            }
+        } else {
+            self.page_cursor = 0;
+            self.hover_url = None;
+            self.apply_cursor();
+            self.invalidate();
         }
-        self.invalidate();
     }
 
     fn handle_mouse_down(&mut self, x: i32, y: i32) {
@@ -589,6 +680,7 @@ impl AppState {
             &self.tabs,
             &self.omnibox,
             self.hover,
+            self.hover_url.as_deref(),
             renderer,
             self.devtools_open,
         );
@@ -610,6 +702,12 @@ unsafe extern "system" fn wnd_proc(
         let state = unsafe { &mut *ptr };
         match msg {
             WM_ERASEBKGND => return 1,
+            WM_SETCURSOR => {
+                if (l_param & 0xFFFF) as isize == HTCLIENT {
+                    state.apply_cursor();
+                    return 1;
+                }
+            }
             WM_SIZE => {
                 let w = (l_param & 0xFFFF) as u32;
                 let h = ((l_param >> 16) & 0xFFFF) as u32;
@@ -699,7 +797,9 @@ unsafe extern "system" fn wnd_proc(
 }
 
 pub fn run_browser_window() -> std::io::Result<()> {
-    unsafe { SetProcessDPIAware() };
+    if unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } == 0 {
+        unsafe { SetProcessDPIAware() };
+    }
 
     let h_instance = unsafe { GetModuleHandleW(null()) };
     let class_name = to_wide_null("ChromeScratchWindowClass");
@@ -731,8 +831,8 @@ pub fn run_browser_window() -> std::io::Result<()> {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            1100,
-            740,
+            1200,
+            780,
             0,
             0,
             h_instance,
@@ -743,11 +843,20 @@ pub fn run_browser_window() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
 
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi > 96 {
+        let scaled_w = ((1200u64 * dpi as u64) / 96).min(1920) as i32;
+        let scaled_h = ((780u64 * dpi as u64) / 96).min(1040) as i32;
+        unsafe {
+            SetWindowPos(hwnd, 0, 0, 0, scaled_w, scaled_h, SWP_NOMOVE | SWP_NOZORDER);
+        }
+    }
+
     let mut rc = RectWin {
         left: 0,
         top: 0,
-        right: 1100,
-        bottom: 740,
+        right: 1200,
+        bottom: 780,
     };
     unsafe { GetClientRect(hwnd, &mut rc) };
     let cw = (rc.right - rc.left).max(1) as u32;
@@ -773,6 +882,8 @@ pub fn run_browser_window() -> std::io::Result<()> {
         omnibox: OmniboxState::new(&initial_url),
         compositor: OwnedCanvas::new(cw, ch),
         hover: None,
+        page_cursor: 0,
+        hover_url: None,
         devtools_open: false,
     });
     state.spawn_and_navigate_tab(initial_id, initial_url, false);

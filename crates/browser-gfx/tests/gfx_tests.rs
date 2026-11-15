@@ -1,4 +1,6 @@
-use browser_gfx::{Color, OwnedCanvas, Rect, measure_text};
+use browser_gfx::{
+    Color, OwnedCanvas, Rect, SvgElement, decode_data_uri, measure_text, rasterize_svg,
+};
 
 #[test]
 fn canvas_clipping_and_alpha_blend() {
@@ -63,4 +65,37 @@ fn decode_bmp_via_gdiplus() {
     let img = browser_gfx::decode_image(&bmp).unwrap();
     assert_eq!((img.width, img.height), (1, 1));
     assert_eq!(img.bgra, vec![0x10, 0x20, 0x30, 255]);
+}
+
+#[test]
+fn svg_rasterizer_and_data_uri_decode() {
+    let elements = vec![
+        SvgElement::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 24.0,
+            h: 24.0,
+            fill: Color::rgb(66, 133, 244),
+        },
+        SvgElement::Circle {
+            cx: 12.0,
+            cy: 12.0,
+            r: 6.0,
+            fill: Color::rgb(255, 255, 255),
+        },
+        SvgElement::Path {
+            d: "M 4 20 L 12 4 L 20 20 Z".to_string(),
+            fill: Color::rgb(52, 168, 83),
+        },
+    ];
+    let svg_img = rasterize_svg((0.0, 0.0, 24.0, 24.0), 48, 48, &elements)
+        .expect("svg should rasterize");
+    assert_eq!((svg_img.width, svg_img.height), (48, 48));
+    assert!(svg_img.bgra.chunks_exact(4).any(|px| px[3] > 0 && px[1] > 100));
+
+    // Same 1x1 24bpp BMP (58 bytes) base64-encoded as data URI
+    let data_uri = "data:image/bmp;base64,Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAECAwAA==";
+    let decoded = decode_data_uri(data_uri).expect("data URI BMP should decode");
+    assert_eq!((decoded.width, decoded.height), (1, 1));
+    assert_eq!(decoded.bgra, vec![0x10, 0x20, 0x30, 255]);
 }

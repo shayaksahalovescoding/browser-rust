@@ -120,10 +120,21 @@ fn live_https_google_and_example_render_check() {
     let ex = load_document(&mut http, "https://example.com/", 1280, 720).unwrap();
     assert_eq!(ex.title, "Example Domain");
 
+    let hn = load_document(&mut http, "https://news.ycombinator.com/", 1280, 720).unwrap();
+    assert!(
+        hn.hits.iter().filter(|h| h.href.is_some()).count() >= 10,
+        "expected clickable links on news.ycombinator.com, got {}",
+        hn.hits.len()
+    );
+
     let g = load_document(&mut http, "https://www.google.com/", 1280, 720).unwrap();
     assert!(
         !g.images.is_empty(),
         "expected decoded Google logo image, got 0 images"
+    );
+    assert!(
+        !g.hits.is_empty(),
+        "expected clickable controls/links on google.com"
     );
     let mut texts = Vec::new();
     collect_rendered_text(&g.layout, &mut texts);

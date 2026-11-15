@@ -78,6 +78,10 @@ impl<'a> CanvasView<'a> {
         self.pixels
     }
 
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        self.pixels
+    }
+
     pub fn clear(&mut self, color: Color) {
         let bgra = color.to_bgra();
         for chunk in self.pixels.chunks_exact_mut(4) {
@@ -273,12 +277,118 @@ impl<'a> CanvasView<'a> {
         }
     }
 
+    /// Draws an anti-aliased capsule line segment from `(x0, y0)` to `(x1, y1)`.
+    pub fn draw_line_aa(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: Color,
+    ) {
+        if color.a == 0 {
+            return;
+        }
+        let half_t = (thickness * 0.5).max(0.5);
+        let pad = (half_t + 1.5).ceil() as i32;
+        let min_x = (x0.min(x1).floor() as i32 - pad).max(0);
+        let max_x = (x0.max(x1).ceil() as i32 + pad).min(self.width as i32 - 1);
+        let min_y = (y0.min(y1).floor() as i32 - pad).max(0);
+        let max_y = (y0.max(y1).ceil() as i32 + pad).min(self.height as i32 - 1);
+        let vx = x1 - x0;
+        let vy = y1 - y0;
+        let len2 = vx * vx + vy * vy;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let dist = if len2 < 1e-6 {
+                    ((px - x0) * (px - x0) + (py - y0) * (py - y0)).sqrt()
+                } else {
+                    let t = (((px - x0) * vx + (py - y0) * vy) / len2).clamp(0.0, 1.0);
+                    let cx = x0 + t * vx;
+                    let cy = y0 + t * vy;
+                    ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt()
+                };
+                let cov = (half_t + 0.5 - dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = ((color.a as f32) * cov).round() as u8;
+                    if a > 0 {
+                        self.set_pixel(x, y, Color::rgba(color.r, color.g, color.b, a));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased circular arc centered at `(cx, cy)`. Angles in degrees (0 = +X, CCW/screen-CW).
+    pub fn draw_arc_aa(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        thickness: f32,
+        start_deg: f32,
+        end_deg: f32,
+        color: Color,
+    ) {
+        if color.a == 0 || radius <= 0.0 {
+            return;
+        }
+        let half_t = (thickness * 0.5).max(0.5);
+        let pad = (radius + half_t + 2.0).ceil() as i32;
+        let min_x = (cx.floor() as i32 - pad).max(0);
+        let max_x = (cx.ceil() as i32 + pad).min(self.width as i32 - 1);
+        let min_y = (cy.floor() as i32 - pad).max(0);
+        let max_y = (cy.ceil() as i32 + pad).min(self.height as i32 - 1);
+
+        let start = start_deg.rem_euclid(360.0);
+        let span = (end_deg - start_deg).clamp(0.0, 360.0);
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let dx = (x as f32 + 0.5) - cx;
+                let dy = (y as f32 + 0.5) - cy;
+                let deg = dy.atan2(dx).to_degrees().rem_euclid(360.0);
+                let rel = (deg - start).rem_euclid(360.0);
+                if rel > span {
+                    continue;
+                }
+                let dist = (dx * dx + dy * dy).sqrt();
+                let ring_dist = (dist - radius).abs();
+                let cov = (half_t + 0.5 - ring_dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = ((color.a as f32) * cov).round() as u8;
+                    if a > 0 {
+                        self.set_pixel(x, y, Color::rgba(color.r, color.g, color.b, a));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: i32, color: Color) {
-        let r2 = radius * radius;
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dx * dx + dy * dy <= r2 {
-                    self.set_pixel(cx + dx, cy + dy, color);
+        if radius <= 0 || color.a == 0 {
+            return;
+        }
+        let rf = radius as f32;
+        let x0 = (cx - radius - 1).max(0);
+        let x1 = (cx + radius + 1).min(self.width as i32 - 1);
+        let y0 = (cy - radius - 1).max(0);
+        let y1 = (cy + radius + 1).min(self.height as i32 - 1);
+        for y in y0..=y1 {
+            let dy = (y - cy) as f32;
+            for x in x0..=x1 {
+                let dx = (x - cx) as f32;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let cov = (rf + 0.5 - dist).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = ((color.a as f32) * cov).round() as u8;
+                    if a > 0 {
+                        self.set_pixel(x, y, Color::rgba(color.r, color.g, color.b, a));
+                    }
                 }
             }
         }
@@ -325,7 +435,7 @@ impl<'a> CanvasView<'a> {
         draw_text_clipped_styled(self, x, y, style, color, text, max_width);
     }
 
-    /// Alpha-blends a decoded BGRA8 image scaled to `dst_rect`.
+    /// Bilinearly alpha-blends a decoded BGRA8 image scaled smoothly to `dst_rect`.
     pub fn blit_bgra_scaled(
         &mut self,
         dst_rect: Rect,
@@ -336,26 +446,64 @@ impl<'a> CanvasView<'a> {
         if dst_rect.w <= 0 || dst_rect.h <= 0 || src_w == 0 || src_h == 0 {
             return;
         }
+        let expected_len = (src_w as usize) * (src_h as usize) * 4;
+        if src_pixels.len() < expected_len {
+            return;
+        }
         let x0 = dst_rect.x.max(0);
         let y0 = dst_rect.y.max(0);
         let x1 = (dst_rect.x + dst_rect.w).min(self.width as i32);
         let y1 = (dst_rect.y + dst_rect.h).min(self.height as i32);
+        let sw_max = (src_w - 1) as f32;
+        let sh_max = (src_h - 1) as f32;
+        let scale_x = src_w as f32 / dst_rect.w as f32;
+        let scale_y = src_h as f32 / dst_rect.h as f32;
+
+        let sample = |ix: u32, iy: u32| -> (f32, f32, f32, f32) {
+            let i = ((iy as usize) * (src_w as usize) + (ix as usize)) * 4;
+            let a = src_pixels[i + 3] as f32;
+            (
+                src_pixels[i + 2] as f32,
+                src_pixels[i + 1] as f32,
+                src_pixels[i] as f32,
+                a,
+            )
+        };
+
         for dy in y0..y1 {
-            let sy = (((dy - dst_rect.y) as usize) * (src_h as usize)) / (dst_rect.h as usize);
+            let fy = (((dy - dst_rect.y) as f32 + 0.5) * scale_y - 0.5).clamp(0.0, sh_max);
+            let y_lo = fy.floor() as u32;
+            let y_hi = (y_lo + 1).min(src_h - 1);
+            let ty = fy - y_lo as f32;
             for dx in x0..x1 {
-                let sx = (((dx - dst_rect.x) as usize) * (src_w as usize)) / (dst_rect.w as usize);
-                let sidx = (sy * (src_w as usize) + sx) * 4;
-                if sidx + 4 <= src_pixels.len() {
-                    let a = src_pixels[sidx + 3];
-                    if a > 0 {
-                        let c = Color::rgba(
-                            src_pixels[sidx + 2],
-                            src_pixels[sidx + 1],
-                            src_pixels[sidx],
-                            a,
-                        );
-                        self.set_pixel(dx, dy, c);
-                    }
+                let fx = (((dx - dst_rect.x) as f32 + 0.5) * scale_x - 0.5).clamp(0.0, sw_max);
+                let x_lo = fx.floor() as u32;
+                let x_hi = (x_lo + 1).min(src_w - 1);
+                let tx = fx - x_lo as f32;
+
+                let (r00, g00, b00, a00) = sample(x_lo, y_lo);
+                let (r10, g10, b10, a10) = sample(x_hi, y_lo);
+                let (r01, g01, b01, a01) = sample(x_lo, y_hi);
+                let (r11, g11, b11, a11) = sample(x_hi, y_hi);
+
+                let w00 = (1.0 - tx) * (1.0 - ty);
+                let w10 = tx * (1.0 - ty);
+                let w01 = (1.0 - tx) * ty;
+                let w11 = tx * ty;
+
+                let a = a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11;
+                if a >= 1.0 {
+                    // Premultiply colors by sample alpha before interpolation to avoid dark fringes
+                    let pm_r = r00 * a00 * w00 + r10 * a10 * w10 + r01 * a01 * w01 + r11 * a11 * w11;
+                    let pm_g = g00 * a00 * w00 + g10 * a10 * w10 + g01 * a01 * w01 + g11 * a11 * w11;
+                    let pm_b = b00 * a00 * w00 + b10 * a10 * w10 + b01 * a01 * w01 + b11 * a11 * w11;
+                    let c = Color::rgba(
+                        (pm_r / a).round().clamp(0.0, 255.0) as u8,
+                        (pm_g / a).round().clamp(0.0, 255.0) as u8,
+                        (pm_b / a).round().clamp(0.0, 255.0) as u8,
+                        a.round().clamp(0.0, 255.0) as u8,
+                    );
+                    self.set_pixel(dx, dy, c);
                 }
             }
         }

@@ -133,3 +133,57 @@ fn hidden_inputs_tables_entities_and_decoded_images() {
     paint_layout_with_assets(&layout, &mut view, 0, &images, Some((q_box.node_id, "rust browser")));
     assert!(canvas.pixels.chunks_exact(4).any(|px| px == green));
 }
+
+#[test]
+fn flex_shifted_links_card_links_and_textarea_controls_align() {
+    let html = r#"
+        <html>
+          <head>
+            <style>
+              .bar { display: flex; justify-content: center; gap: 20px; }
+              textarea.box { display: flex; width: 360px; }
+            </style>
+          </head>
+          <body>
+            <div class="bar">
+              <a href="/first">First Link</a>
+              <a href="/second">Second Link</a>
+            </div>
+            <a href="/card"><div style="padding: 10px;">Card Title</div></a>
+            <textarea class="box" name="q" placeholder="Search"></textarea>
+          </body>
+        </html>
+    "#;
+
+    let doc = parse_html(html);
+    let css = doc.collect_style_blocks();
+    let sheet = Stylesheet::parse(&css);
+    let styles = compute_styles(&doc, &[sheet]);
+    let (layout, hits, _) = LayoutEngine::layout(&doc, &styles, 1000, 600);
+
+    let first_hit = hits
+        .iter()
+        .find(|h| h.href.as_deref() == Some("/first"))
+        .expect("/first link hit target missing");
+    let second_hit = hits
+        .iter()
+        .find(|h| h.href.as_deref() == Some("/second"))
+        .expect("/second link hit target missing");
+    // Centered flex items in 1000px viewport must not have hitboxes left at x=0
+    assert!(
+        first_hit.rect.x > 100 && second_hit.rect.x > first_hit.rect.x,
+        "flex link hits did not shift properly: first={:?}, second={:?}",
+        first_hit.rect,
+        second_hit.rect
+    );
+
+    let card_hit = hits
+        .iter()
+        .find(|h| h.href.as_deref() == Some("/card"))
+        .expect("/card link hit target missing");
+    assert!(card_hit.rect.w > 40 && card_hit.rect.h >= 14);
+
+    let q_box = find_box_by_control(&layout, &|c| matches!(c, ControlKind::TextInput { name, .. } if name == "q"))
+        .expect("textarea with display: flex must still emit TextInput control");
+    assert!(q_box.rect.w >= 300);
+}

@@ -1,54 +1,54 @@
-use crate::canvas::CanvasView;
+use crate::canvas::{CanvasView, Rect};
 use crate::color::Color;
 
 pub fn draw_back_arrow(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
-    canvas.draw_line(cx - 6, cy, cx + 6, cy, color);
-    canvas.draw_line(cx - 6, cy + 1, cx + 6, cy + 1, color);
-    canvas.draw_line(cx - 6, cy, cx - 1, cy - 5, color);
-    canvas.draw_line(cx - 5, cy, cx, cy - 5, color);
-    canvas.draw_line(cx - 6, cy + 1, cx - 1, cy + 6, color);
-    canvas.draw_line(cx - 5, cy + 1, cx, cy + 6, color);
+    let cx = cx as f32 + 0.5;
+    let cy = cy as f32 + 0.5;
+    canvas.draw_line_aa(cx - 5.5, cy, cx + 6.0, cy, 1.7, color);
+    canvas.draw_line_aa(cx - 5.5, cy, cx - 0.5, cy - 5.0, 1.7, color);
+    canvas.draw_line_aa(cx - 5.5, cy, cx - 0.5, cy + 5.0, 1.7, color);
 }
 
 pub fn draw_forward_arrow(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
-    canvas.draw_line(cx - 6, cy, cx + 6, cy, color);
-    canvas.draw_line(cx - 6, cy + 1, cx + 6, cy + 1, color);
-    canvas.draw_line(cx + 6, cy, cx + 1, cy - 5, color);
-    canvas.draw_line(cx + 5, cy, cx, cy - 5, color);
-    canvas.draw_line(cx + 6, cy + 1, cx + 1, cy + 6, color);
-    canvas.draw_line(cx + 5, cy + 1, cx, cy + 6, color);
+    let cx = cx as f32 + 0.5;
+    let cy = cy as f32 + 0.5;
+    canvas.draw_line_aa(cx - 6.0, cy, cx + 5.5, cy, 1.7, color);
+    canvas.draw_line_aa(cx + 5.5, cy, cx + 0.5, cy - 5.0, 1.7, color);
+    canvas.draw_line_aa(cx + 5.5, cy, cx + 0.5, cy + 5.0, 1.7, color);
 }
 
 pub fn draw_reload_icon(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
-    // Draw a crisp octagonal ring with a top-right gap and arrowhead
-    let pts = [
-        (0, -6),
-        (-3, -5),
-        (-5, -3),
-        (-6, 0),
-        (-5, 3),
-        (-3, 5),
-        (0, 6),
-        (3, 5),
-        (5, 3),
-    ];
-    for w in pts.windows(2) {
-        canvas.draw_line(cx + w[0].0, cy + w[0].1, cx + w[1].0, cy + w[1].1, color);
-    }
-    // Arrowhead at top-right
-    canvas.draw_line(cx + 1, cy - 6, cx + 5, cy - 4, color);
-    canvas.draw_line(cx + 5, cy - 4, cx + 5, cy - 8, color);
-    canvas.draw_line(cx + 5, cy - 4, cx + 1, cy - 3, color);
+    let fx = cx as f32 + 0.5;
+    let fy = cy as f32 + 0.5;
+    canvas.draw_arc_aa(fx, fy, 5.5, 1.65, 35.0, 325.0, color);
+    canvas.draw_line_aa(fx + 4.8, fy - 3.2, fx + 4.8, fy - 7.0, 1.6, color);
+    canvas.draw_line_aa(fx + 4.8, fy - 3.2, fx + 1.2, fy - 2.6, 1.6, color);
 }
 
 pub fn draw_close_icon(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
-    canvas.draw_line(cx - 4, cy - 4, cx + 4, cy + 4, color);
-    canvas.draw_line(cx - 4, cy + 4, cx + 4, cy - 4, color);
+    let cx = cx as f32 + 0.5;
+    let cy = cy as f32 + 0.5;
+    canvas.draw_line_aa(cx - 3.8, cy - 3.8, cx + 3.8, cy + 3.8, 1.5, color);
+    canvas.draw_line_aa(cx - 3.8, cy + 3.8, cx + 3.8, cy - 3.8, 1.5, color);
 }
 
 pub fn draw_plus_icon(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
-    canvas.draw_line(cx - 5, cy, cx + 5, cy, color);
-    canvas.draw_line(cx - 5, cy + 1, cx + 5, cy + 1, color);
-    canvas.draw_line(cx, cy - 5, cx, cy + 5, color);
-    canvas.draw_line(cx + 1, cy - 5, cx + 1, cy + 5, color);
+    let cx = cx as f32 + 0.5;
+    let cy = cy as f32 + 0.5;
+    canvas.draw_line_aa(cx - 5.0, cy, cx + 5.0, cy, 1.65, color);
+    canvas.draw_line_aa(cx, cy - 5.0, cx, cy + 5.0, 1.65, color);
+}
+
+pub fn draw_lock_icon(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
+    let fx = cx as f32 + 0.5;
+    let fy = cy as f32 + 0.5;
+    canvas.draw_arc_aa(fx, fy - 2.0, 2.8, 1.4, 180.0, 360.0, color);
+    canvas.fill_rounded_rect(Rect::new(cx - 4, cy - 1, 9, 7), 2, color);
+}
+
+pub fn draw_search_icon(canvas: &mut CanvasView<'_>, cx: i32, cy: i32, color: Color) {
+    let fx = cx as f32;
+    let fy = cy as f32;
+    canvas.draw_arc_aa(fx - 1.0, fy - 1.0, 4.5, 1.6, 0.0, 360.0, color);
+    canvas.draw_line_aa(fx + 2.3, fy + 2.3, fx + 5.8, fy + 5.8, 1.7, color);
 }

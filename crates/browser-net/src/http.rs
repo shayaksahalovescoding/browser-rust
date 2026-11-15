@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::deflate::{decompress_gzip, decompress_zlib};
@@ -85,16 +85,21 @@ impl CookieJar {
     }
 
     pub fn cookie_header(&self, host: &str) -> Option<String> {
-        let list = self.cookies.get(&host.to_ascii_lowercase())?;
-        if list.is_empty() {
-            return None;
+        let host_l = host.to_ascii_lowercase();
+        let mut pairs = Vec::new();
+        for (cookie_host, list) in &self.cookies {
+            let domain = cookie_host.trim_start_matches('.');
+            if host_l == domain || host_l.ends_with(&format!(".{domain}")) {
+                for (k, v) in list {
+                    pairs.push(format!("{k}={v}"));
+                }
+            }
         }
-        Some(
-            list.iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(pairs.join("; "))
+        }
     }
 }
 
@@ -174,17 +179,25 @@ impl HttpClient {
     }
 
     fn fetch_single(&self, url: &Url) -> Result<HttpResponse, NetError> {
-        let addr = format!("{}:{}", url.host, url.port);
-        let tcp = TcpStream::connect(&addr)?;
+        let tcp = connect_tcp_with_fallback(&url.host, url.port, Duration::from_secs(6))?;
         let _ = tcp.set_read_timeout(Some(self.timeout));
         let _ = tcp.set_write_timeout(Some(self.timeout));
 
         let mut req = format!(
             "GET {} HTTP/1.1\r\n\
              Host: {}\r\n\
-             User-Agent: ChromeScratch/0.1 (Windows NT 10.0; Win64; x64)\r\n\
-             Accept: text/html,application/xhtml+xml,text/css,*/*;q=0.8\r\n\
+             User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36\r\n\
+             Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n\
+             Accept-Language: en-US,en;q=0.9\r\n\
              Accept-Encoding: gzip, deflate\r\n\
+             Sec-CH-UA: \"Chromium\";v=\"134\", \"Not:A-Brand\";v=\"24\", \"Google Chrome\";v=\"134\"\r\n\
+             Sec-CH-UA-Mobile: ?0\r\n\
+             Sec-CH-UA-Platform: \"Windows\"\r\n\
+             Sec-Fetch-Dest: document\r\n\
+             Sec-Fetch-Mode: navigate\r\n\
+             Sec-Fetch-Site: none\r\n\
+             Sec-Fetch-User: ?1\r\n\
+             Upgrade-Insecure-Requests: 1\r\n\
              Connection: close\r\n",
             url.path_and_query,
             url.host_header()
@@ -198,30 +211,138 @@ impl HttpClient {
             let mut tls = TlsStream::connect(tcp, &url.host)?;
             tls.write_all(req.as_bytes())?;
             tls.flush()?;
-            read_all_until_eof(&mut tls)?
+            read_http_raw(&mut tls)?
         } else {
             let mut tcp = tcp;
             tcp.write_all(req.as_bytes())?;
             tcp.flush()?;
-            read_all_until_eof(&mut tcp)?
+            read_http_raw(&mut tcp)?
         };
 
         parse_http_response(&raw, url.as_str())
     }
 }
 
-fn read_all_until_eof<R: Read>(r: &mut R) -> Result<Vec<u8>, NetError> {
+fn connect_tcp_with_fallback(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, NetError> {
+    let mut addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(NetError::Http(format!("DNS resolved zero addresses for {host}")));
+    }
+    // Prefer IPv4 first to avoid broken IPv6 routes stalling connections on Windows.
+    addrs.sort_by_key(|a| if a.is_ipv4() { 0u8 } else { 1u8 });
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err
+        .map(NetError::from)
+        .unwrap_or_else(|| NetError::Http("TCP connect failed".into())))
+}
+
+enum HttpFraming {
+    Unknown,
+    NoBody,
+    ContentLength(usize),
+    Chunked,
+    UntilEof,
+}
+
+fn detect_http_framing(head: &[u8]) -> HttpFraming {
+    let head_str = String::from_utf8_lossy(head);
+    let mut lines = head_str.split("\r\n");
+    if let Some(status_line) = lines.next() {
+        let code = status_line.split_whitespace().nth(1).unwrap_or("");
+        if code == "204" || code == "304" {
+            return HttpFraming::NoBody;
+        }
+    }
+    let mut content_len = None;
+    let mut chunked = false;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let kl = k.trim();
+            if kl.eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+            {
+                chunked = true;
+            } else if kl.eq_ignore_ascii_case("content-length") {
+                content_len = v.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    if chunked {
+        HttpFraming::Chunked
+    } else if let Some(n) = content_len {
+        HttpFraming::ContentLength(n)
+    } else {
+        HttpFraming::UntilEof
+    }
+}
+
+fn chunk_stream_complete(mut data: &[u8]) -> bool {
+    loop {
+        let Some(crlf) = data.windows(2).position(|w| w == b"\r\n") else {
+            return false;
+        };
+        let size_line = match std::str::from_utf8(&data[..crlf]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let hex = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(sz) = usize::from_str_radix(hex, 16) else {
+            return false;
+        };
+        data = &data[crlf + 2..];
+        if sz == 0 {
+            return data.windows(2).any(|w| w == b"\r\n") || data.is_empty();
+        }
+        if data.len() < sz + 2 {
+            return false;
+        }
+        data = &data[sz + 2..];
+    }
+}
+
+fn read_http_raw<R: Read>(r: &mut R) -> Result<Vec<u8>, NetError> {
     let mut out = Vec::new();
     let mut buf = [0u8; 16384];
+    let mut header_end: Option<usize> = None;
+    let mut framing = HttpFraming::Unknown;
+
     loop {
+        if let Some(he) = header_end {
+            let body = &out[he + 4..];
+            match framing {
+                HttpFraming::NoBody => break,
+                HttpFraming::ContentLength(len) if body.len() >= len => break,
+                HttpFraming::Chunked if chunk_stream_complete(body) => break,
+                _ => {}
+            }
+        }
         match r.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if header_end.is_none() {
+                    if let Some(he) = out.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(he);
+                        framing = detect_http_framing(&out[..he]);
+                    }
+                }
+            }
             Err(e)
-                if e.kind() == std::io::ErrorKind::ConnectionReset
-                    || e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ) =>
             {
-                if !out.is_empty() {
+                if header_end.is_some() {
                     break;
                 }
                 return Err(e.into());
